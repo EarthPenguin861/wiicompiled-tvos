@@ -6,6 +6,7 @@
 # so it is encrypted with the same key before it is published as the release `tvos-<run number>`;
 # Launcher/tvos/fetch-ipa.sh downloads and decrypts it on your own machine for atvloadly.
 name: tvOS build
+run-name: tvOS build for ${{ inputs.cpu }}
 
 on:
   workflow_dispatch:
