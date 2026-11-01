@@ -78,3 +78,8 @@ output.txt
 
 # Operating System
 .DS_Store
+
+# Built tvOS apps contain the user's game: never commit them
+/IPA/
+*.ipa
+*.ipa.enc.part-*
