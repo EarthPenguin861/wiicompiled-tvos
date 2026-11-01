@@ -1,6 +1,8 @@
 #include "platform/host_platform.h"
+#include "platform/apple_target.h"
 
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 #if defined(_WIN32)
@@ -71,6 +73,22 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
         const std::filesystem::path directory = std::filesystem::path(rawPath) / applicationName;
         CoTaskMemFree(rawPath);
         return directory;
+    }
+#elif MKW_HOST_TVOS
+    // tvOS grants an app no persistent local storage beyond NSUserDefaults; the
+    // container's Library/Caches is the only writable directory that survives
+    // relaunches (the system may purge it when the Apple TV runs low on space).
+    // SDL_GetPrefPath makes the same choice on tvOS. HOME is the app container.
+    if (const char* home = std::getenv("HOME"); home && *home) {
+        return std::filesystem::path(home) / "Library" / "Caches" / applicationName;
+    }
+    // confstr reports the size it needs (terminator included) when given no buffer.
+    if (const size_t needed = confstr(_CS_DARWIN_USER_CACHE_DIR, nullptr, 0); needed > 1) {
+        std::string cacheDirectory(needed, '\0');
+        if (confstr(_CS_DARWIN_USER_CACHE_DIR, cacheDirectory.data(), cacheDirectory.size()) == needed) {
+            cacheDirectory.resize(needed - 1);
+            return std::filesystem::path(cacheDirectory) / applicationName;
+        }
     }
 #elif defined(__APPLE__)
     if (const char* home = std::getenv("HOME"); home && *home) {

@@ -1,0 +1,2080 @@
+diff --git a/.github/workflows/tvos.yml b/.github/workflows/tvos.yml
+new file mode 100644
+index 0000000..48949c0
+--- /dev/null
++++ b/.github/workflows/tvos.yml
+@@ -0,0 +1,118 @@
++# Builds the Apple TV app (docs/building-tvos.md) on a GitHub-hosted Mac.
++#
++# Game data never enters the repository. It is uploaded once, AES-256 encrypted, as the assets of
++# the release tagged `game-data` (Launcher/tvos/encrypt-game-data.sh), and decrypted here with the
++# MKW_DATA_KEY repository secret. The finished, ad-hoc signed WiiCompiled.ipa contains the game,
++# so it is encrypted with the same key before it is published as the release `tvos-<run number>`;
++# Launcher/tvos/fetch-ipa.sh downloads and decrypts it on your own machine for atvloadly.
++name: tvOS build
++
++on:
++  workflow_dispatch:
++    inputs:
++      cpu:
++        description: Oldest Apple TV the build must run on
++        type: choice
++        default: apple-a8
++        options:
++          - apple-a8    # Apple TV HD and every Apple TV 4K
++          - apple-a10   # Apple TV 4K (1st generation) and later
++          - apple-a12   # Apple TV 4K (2nd generation) and later
++          - apple-a15   # Apple TV 4K (3rd generation)
++
++permissions:
++  contents: write   # download game-data assets, publish the encrypted IPA release
++
++concurrency:
++  group: tvos-build
++  cancel-in-progress: false
++
++jobs:
++  tvos:
++    runs-on: macos-15
++    timeout-minutes: 355
++    env:
++      GH_TOKEN: ${{ github.token }}
++      MKW_DATA_KEY: ${{ secrets.MKW_DATA_KEY }}
++    steps:
++      - name: Check the data key secret
++        run: |
++          if [ -z "$MKW_DATA_KEY" ]; then
++            echo "::error::The MKW_DATA_KEY repository secret is missing (see docs/building-tvos.md)."
++            exit 1
++          fi
++
++      - name: Free disk space
++        run: |
++          df -h /
++          selected=$(dirname "$(dirname "$(xcode-select -p)")")
++          echo "Selected Xcode: $selected"
++          # Other Xcode versions, simulator runtimes and the Android SDK are unused by a device build.
++          for xcode in /Applications/Xcode*.app; do
++            [ "$xcode" = "$selected" ] || sudo rm -rf "$xcode"
++          done
++          xcrun simctl runtime delete all >/dev/null 2>&1 || true
++          sudo rm -rf "${ANDROID_HOME:-/nonexistent}" "$HOME/Library/Android" /usr/local/share/android-sdk || true
++          df -h /
++
++      - uses: actions/checkout@v4
++        with:
++          submodules: recursive
++
++      - name: Apply the aurora tvOS patch
++        run: git -C aurora-main apply --verbose ../tvos-port-patches/aurora-tvos.patch
++
++      - uses: actions/setup-dotnet@v4
++        with:
++          dotnet-version: 8.0.x
++
++      - name: Tools
++        run: |
++          brew list ninja >/dev/null 2>&1 || brew install ninja
++          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
++          echo "OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
++          xcodebuild -version
++          xcrun --sdk appletvos --show-sdk-path
++          cmake --version | head -n 1
++          ninja --version
++          dotnet --list-sdks
++          sysctl -n hw.ncpu hw.memsize
++
++      - name: Restore the game data
++        run: |
++          mkdir -p "$RUNNER_TEMP/game" Assets
++          gh release download game-data --dir "$RUNNER_TEMP/game" --pattern 'mkw-data.tar.enc.part-*'
++          cat "$RUNNER_TEMP"/game/mkw-data.tar.enc.part-* \
++            | "$OPENSSL" enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -pass env:MKW_DATA_KEY \
++            | tar -xf - -C Assets
++          rm -rf "$RUNNER_TEMP/game"
++          cp Assets/DATA/sys/main.dol Assets/main.dol
++          cp Assets/DATA/files/rel/StaticR.rel Assets/StaticR.rel
++          shasum -a 256 Assets/main.dol Assets/StaticR.rel
++          du -sh Assets/DATA
++          df -h /
++
++      - name: Build WiiCompiled for tvOS
++        run: |
++          bash Launcher/tvos/build-tvos.command \
++            --output-dir "$RUNNER_TEMP/out" \
++            --cpu "${{ inputs.cpu }}" \
++            --adhoc-sign \
++            --ipa
++          df -h /
++
++      - name: Publish the encrypted IPA
++        run: |
++          out="$RUNNER_TEMP/out"
++          # The app copy is no longer needed and holds another copy of the game data.
++          rm -rf "$out/WiiCompiled.app"
++          "$OPENSSL" enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -salt -pass env:MKW_DATA_KEY \
++            -in "$out/WiiCompiled.ipa" \
++            | split -b 1900m - "$out/WiiCompiled.ipa.enc.part-"
++          rm -f "$out/WiiCompiled.ipa"
++          ls -l "$out"
++          tag="tvos-${{ github.run_number }}"
++          gh release create "$tag" "$out"/WiiCompiled.ipa.enc.part-* \
++            --target "${{ github.sha }}" \
++            --title "WiiCompiled tvOS build ${{ github.run_number }} (${{ inputs.cpu }})" \
++            --notes "Encrypted WiiCompiled.ipa (built for ${{ inputs.cpu }}). Download and decrypt with: bash Launcher/tvos/fetch-ipa.sh KEY_FILE OUT_DIR $tag"
+diff --git a/.gitignore b/.gitignore
+index 704d29c..37b7739 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -28,6 +28,8 @@ Code.pul
+ /build-*/
+ /native-build/
+ /native-build-macos/
++/native-build-tvos/
++/native-build-tvos-simulator/
+ /local-products/
+ /dist/
+ /out/
+diff --git a/Launcher/tvos/build-tvos.command b/Launcher/tvos/build-tvos.command
+new file mode 100755
+index 0000000..585c0c6
+--- /dev/null
++++ b/Launcher/tvos/build-tvos.command
+@@ -0,0 +1,391 @@
++#!/usr/bin/env bash
++# Builds WiiCompiled for Apple TV on a Mac:
++#   extract -> translate -> cross-compile for tvOS -> bundle the user's game data -> sign -> install.
++#
++# The translation and the C++ build are the same as Launcher/local-build-macos.command; only the
++# native configure targets tvOS (arm64) instead of the host. See docs/building-tvos.md.
++# Must stay compatible with macOS's bash 3.2.
++set -euo pipefail
++
++script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++launcher_dir=$(cd "$script_dir/.." && pwd)
++default_workspace=$(cd "$launcher_dir/.." && pwd)
++# shellcheck source=../build-cache.sh
++source "$launcher_dir/build-cache.sh"
++
++fail() { printf 'build-tvos.command: error: %s\n' "$*" >&2; exit 1; }
++step() { printf 'MKWCBUILD:STEP:%s %s\n' "$1" "$2"; }
++note() { printf 'MKWCBUILD: %s\n' "$*"; }
++assert_file() { [[ -f "$1" ]] || fail "$2 is missing: $1"; }
++assert_dir() { [[ -d "$1" ]] || fail "$2 is missing: $1"; }
++
++usage() {
++    cat <<'EOF'
++Usage: build-tvos.command --output-dir DIR [options]
++
++Builds the base game (WiiCompiled) as an Apple TV app. Retro Rewind is not supported on tvOS.
++
++Game data
++  --game IMAGE --nodtool PATH     Extract and verify a clean supported disc image first
++                                  (otherwise Assets/ from an earlier extraction is used)
++
++Target
++  --simulator                     Build for the Apple TV Simulator (Apple Silicon Mac) instead of a device
++  --cpu NAME                      Oldest Apple TV CPU to support (default: apple-a8 = Apple TV HD;
++                                  apple-a10, apple-a12 or apple-a15 for Apple TV 4K-only builds)
++  --deployment-target VERSION     Minimum tvOS version (default: 15.0)
++  --bundle-id ID                  CFBundleIdentifier (default: local.wiicompiled.tvos); must match
++                                  the provisioning profile used for a device build
++
++Signing (device builds)
++  --provisioning-profile PATH     tvOS .mobileprovision covering --bundle-id and your Apple TV
++                                  (default: searched in Xcode's provisioning profile folders)
++  --sign-identity ID              Code signing identity name or SHA-1 (default: the profile's
++                                  certificate that is present in your keychain)
++  --no-sign                       Leave the app unsigned (a device build then cannot be installed)
++  --adhoc-sign                    Ad-hoc sign instead (no Apple account; for re-signing sideload
++                                  tools such as atvloadly, which sign with your Apple ID)
++
++Packaging
++  --ipa                           Also write WiiCompiled.ipa (Payload/WiiCompiled.app, zipped) beside
++                                  the app, the format sideloading tools install
++
++Install
++  --install                       Install on --device, or on the booted simulator with --simulator
++  --device ID                     Apple TV identifier or name as listed by: xcrun devicectl list devices
++  --launch                        Launch after installing
++
++Build
++  --output-dir DIR                Where WiiCompiled.app is written (required)
++  --workspace DIR                 Repository root (default: this script's repository)
++  --force-clean-build             Delete local generated and tvOS native build caches
++  --parallel N                    Pin translation and build parallelism
++  --cmake PATH --ninja PATH       Override build tools
++  --dotnet PATH                   Override dotnet
++  --translator-bin PATH           Use a self-contained Translator.Cli executable
++  --setup-version VERSION         Version recorded in the runtime log and Info.plist
++EOF
++}
++
++workspace="$default_workspace"; output_dir=""; game=""; nodtool=""
++simulator=0; cpu=apple-a8; deployment_target=15.0; bundle_id=local.wiicompiled.tvos
++profile_path=""; sign_identity=""; no_sign=0; adhoc_sign=0; make_ipa=0; install=0; device=""; launch=0
++force_clean=0; parallel=0; cmake_bin=cmake; ninja_bin=ninja; dotnet_bin=dotnet; translator_bin=""
++setup_version=""
++while (($#)); do
++    case "$1" in
++        --workspace) workspace=${2:-}; shift 2 ;;
++        --output-dir) output_dir=${2:-}; shift 2 ;;
++        --game) game=${2:-}; shift 2 ;;
++        --nodtool) nodtool=${2:-}; shift 2 ;;
++        --simulator) simulator=1; shift ;;
++        --cpu) cpu=${2:-}; shift 2 ;;
++        --deployment-target) deployment_target=${2:-}; shift 2 ;;
++        --bundle-id) bundle_id=${2:-}; shift 2 ;;
++        --provisioning-profile) profile_path=${2:-}; shift 2 ;;
++        --sign-identity) sign_identity=${2:-}; shift 2 ;;
++        --no-sign) no_sign=1; shift ;;
++        --adhoc-sign) adhoc_sign=1; shift ;;
++        --ipa) make_ipa=1; shift ;;
++        --install) install=1; shift ;;
++        --device) device=${2:-}; shift 2 ;;
++        --launch) launch=1; shift ;;
++        --force-clean-build) force_clean=1; shift ;;
++        --parallel) parallel=${2:-}; shift 2 ;;
++        --cmake) cmake_bin=${2:-}; shift 2 ;;
++        --ninja) ninja_bin=${2:-}; shift 2 ;;
++        --dotnet) dotnet_bin=${2:-}; shift 2 ;;
++        --translator-bin) translator_bin=${2:-}; shift 2 ;;
++        --setup-version) setup_version=${2:-}; shift 2 ;;
++        -h|--help) usage; exit 0 ;;
++        *) fail "unknown option: $1" ;;
++    esac
++done
++
++# ---------------------------------------------------------------- validation
++[[ $(uname -s) == Darwin ]] || fail 'building for Apple TV requires a Mac with Xcode'
++[[ -n "$output_dir" ]] || fail '--output-dir is required'
++[[ "$cpu" =~ ^apple-a(8|9|10|11|12|13|14|15|16|17|18)$ ]] || fail "--cpu must be an Apple A-series CPU such as apple-a8 (got '$cpu')"
++[[ "$deployment_target" =~ ^[0-9]+\.[0-9]+$ ]] || fail "--deployment-target must look like 15.0 (got '$deployment_target')"
++[[ "$bundle_id" =~ ^[A-Za-z0-9.-]+$ && "$bundle_id" == *.* ]] || fail "--bundle-id must be a reverse-DNS identifier (got '$bundle_id')"
++[[ "$parallel" =~ ^[0-9]+$ ]] || fail '--parallel must be a whole number'
++if [[ -n "$game" || -n "$nodtool" ]]; then [[ -n "$game" && -n "$nodtool" ]] || fail '--game and --nodtool must be supplied together'; fi
++if (( simulator )); then
++    [[ $(uname -m) == arm64 ]] || fail '--simulator needs an Apple Silicon Mac (the port is arm64-only)'
++    [[ -z "$profile_path" && -z "$sign_identity" ]] || fail 'simulator builds are ad-hoc signed; drop --provisioning-profile/--sign-identity'
++    [[ -z "$device" ]] || fail '--device is for device builds; --install --simulator uses the booted simulator'
++    sdk=appletvsimulator
++else
++    sdk=appletvos
++fi
++(( no_sign && adhoc_sign )) && fail 'choose only one of --no-sign and --adhoc-sign'
++if (( adhoc_sign )); then
++    [[ -z "$profile_path" && -z "$sign_identity" ]] || fail '--adhoc-sign uses no profile or identity; drop --provisioning-profile/--sign-identity'
++fi
++if (( install )); then
++    (( no_sign )) && fail '--install needs a signed app; drop --no-sign'
++    (( adhoc_sign && ! simulator )) && fail '--install on a device needs a real signature; drop --adhoc-sign'
++    (( simulator )) || [[ -n "$device" ]] || fail '--install needs --device (see: xcrun devicectl list devices)'
++fi
++(( launch )) && ! (( install )) && fail '--launch requires --install'
++
++workspace=$(cd "$workspace" && pwd)
++if [[ -z "$setup_version" && -f "$workspace/Launcher/Directory.Build.props" ]]; then
++    setup_version=$(sed -nE 's/.*<Version>([^<]+)<\/Version>.*/\1/p' "$workspace/Launcher/Directory.Build.props" | head -n 1)
++fi
++[[ "$setup_version" =~ ^[0-9A-Za-z.+-]*$ ]] || fail '--setup-version contains unsupported characters'
++
++# The tvOS SDKs ship only with full Xcode, not with the Command Line Tools.
++sysroot=$(xcrun --sdk "$sdk" --show-sdk-path 2>/dev/null) && [[ -d "$sysroot" ]] || \
++    fail "the $sdk SDK was not found; install Xcode with the tvOS platform (Xcode > Settings > Components) and select it with: sudo xcode-select -s /Applications/Xcode.app"
++sdk_version=$(xcrun --sdk "$sdk" --show-sdk-version 2>/dev/null || true)
++cc_bin=$(xcrun --sdk "$sdk" -f clang 2>/dev/null) || fail 'Xcode clang not found'
++cxx_bin=$(xcrun --sdk "$sdk" -f clang++ 2>/dev/null) || fail 'Xcode clang++ not found'
++for tool in "$cmake_bin" "$ninja_bin" "$cc_bin" "$cxx_bin" shasum rsync codesign python3; do
++    command -v "$tool" >/dev/null || fail "required tool not found: $tool"
++done
++note "tvOS SDK $sdk_version ($sdk), CPU $cpu, minimum tvOS $deployment_target"
++
++# ---------------------------------------------------------------- game data
++assets="$workspace/Assets"; generated="$workspace/generated"
++functions="$generated/functions"; metadata="$generated/base_translation_output.json"; manifest_dir="$workspace/build/base"
++manifest="$manifest_dir/mkwii_base_manifest.json"; shards="$generated/build_shards"
++if (( simulator )); then native_build="$workspace/native-build-tvos-simulator"; else native_build="$workspace/native-build-tvos"; fi
++
++if [[ -n "$game" ]]; then
++    # Through bash: the executable bit may not survive copying the repository to the Mac.
++    bash "$launcher_dir/macos/extract-disc.command" --workspace "$workspace" --game "$game" --assets-dir "$assets" --nodtool "$nodtool"
++fi
++assert_file "$assets/main.dol" 'extracted main.dol (pass --game and --nodtool)'
++assert_file "$assets/StaticR.rel" 'extracted StaticR.rel (pass --game and --nodtool)'
++# The app reads the disc's files from inside its own bundle (an Apple TV app has nowhere else to
++# keep them), so the extracted DATA directory is required here, not just main.dol/StaticR.rel.
++assert_file "$assets/DATA/sys/boot.bin" 'extracted DATA/sys/boot.bin (pass --game and --nodtool)'
++assert_file "$assets/DATA/sys/fst.bin" 'extracted DATA/sys/fst.bin (pass --game and --nodtool)'
++assert_dir "$assets/DATA/files" 'extracted DATA/files (pass --game and --nodtool)'
++# The translation project is the one pinned to the extracted main.dol, which decides the region.
++project=$(mkw_resolve_project "$workspace" "$assets") || fail 'the extracted game cannot be translated'
++region=$(mkw_project_pin "$project" region); [[ -n "$region" ]] || fail "could not find the region of $project"
++
++if (( force_clean )); then
++    step force-clean 'Discarding translation and tvOS native build caches'
++    rm -rf "$generated" "$manifest_dir" "$native_build"
++fi
++
++# ---------------------------------------------------------------- translation (host)
++if [[ -n "$translator_bin" ]]; then
++    assert_file "$translator_bin" 'Translator.Cli executable'
++    translator() { "$translator_bin" "$@"; }
++else
++    command -v "$dotnet_bin" >/dev/null || fail "required tool not found: $dotnet_bin (install the .NET 8 SDK)"
++    translator_dll="$workspace/translator/src/Translator.Cli/bin/Release/net8.0/Translator.Cli.dll"
++    if [[ ! -f "$translator_dll" ]]; then
++        step build-translator 'Building the translator'
++        "$dotnet_bin" build "$workspace/translator/src/Translator.Cli/Translator.Cli.csproj" -c Release
++    fi
++    translator() { "$dotnet_bin" "$translator_dll" "$@"; }
++fi
++
++entry_point=$(awk '/^translation:/{inside=1} inside && /^[[:space:]]*-[[:space:]]*0[xX][0-9a-fA-F]+[[:space:]]*$/{gsub(/^[[:space:]]*-[[:space:]]*/, ""); print; exit}' "$project")
++[[ -n "$entry_point" ]] || fail 'could not find the translation entry point'
++host_cpus=$(sysctl -n hw.ncpu); mem_gib=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )); (( mem_gib < 1 )) && mem_gib=1
++if (( parallel > 0 )); then translator_threads=$parallel; translated_jobs=$parallel; global_jobs=$parallel
++else translator_threads=$(( host_cpus < 16 ? host_cpus : 16 )); translated_jobs=$(( host_cpus < mem_gib / 2 ? host_cpus : mem_gib / 2 )); (( translated_jobs < 1 )) && translated_jobs=1; global_jobs=$host_cpus; fi
++
++translation_provenance="$generated/translation-provenance.json"
++translation_fingerprint=$(mkw_translation_identity "$workspace" "${translator_bin:-$(dirname "${translator_dll:-}")}" "$script_dir/build-tvos.command")
++if [[ "$(mkw_read_identity "$translation_provenance" TranslationFingerprint)" == "$translation_fingerprint" && -f "$metadata" && -f "$manifest" ]]; then
++    step reuse-base-translation 'Reusing the completed base translation'
++else
++    rm -f "$translation_provenance"; mkdir -p "$functions" "$manifest_dir"
++    step translate-base 'Translating the user-owned base game'
++    translator translate-recursive "$entry_point" --project "$project" --outdir "$functions" --output-metadata "$metadata" --production-source-bundle "$generated/base_translation_sources.bin" --no-function-files --prune-stale --threads "$translator_threads"
++    step emit-base-manifest 'Creating the local base translation manifest'
++    translator emit-base-manifest --project "$project" --out "$manifest_dir" --functions-dir "$functions" --translation-output-metadata "$metadata" --region "$region"
++    mkw_write_identity "$translation_provenance" TranslationFingerprint "$translation_fingerprint"
++fi
++step generate-data-init 'Generating local game data initialization'
++translator generate-data-init --project "$project"
++# Base game only: no --resolved-profile/--retro-cpp-dir, so the shard graph has no Retro Rewind.
++step emit-build-shards 'Preparing native build shards'
++translator emit-build-shards --project "$project" --base-metadata "$metadata" --base-functions-dir "$functions" --native-source-dir "$workspace/runtime/src" --out "$shards"
++
++# ---------------------------------------------------------------- native cross-build (tvOS)
++toolchain_provenance="$native_build/toolchain-provenance.json"
++toolchain_fingerprint=$(printf '%s\n' "$(mkw_toolchain_identity "$workspace" "$cc_bin" "$cxx_bin" "$cmake_bin" "$ninja_bin")" \
++    "$cc_bin" "$cxx_bin" "$sysroot" "$sdk_version" "$deployment_target" "$cpu" "$bundle_id" | mkw_sha256)
++if [[ -d "$native_build" && "$(mkw_read_identity "$toolchain_provenance" ToolchainFingerprint)" != "$toolchain_fingerprint" ]]; then
++    note 'The toolchain, SDK, target or a pinned dependency changed; rebuilding the tvOS native build from scratch'
++    rm -rf "$native_build"
++fi
++step configure-native 'Configuring the tvOS cross-build'
++# Dawn and SDL3 are built from aurora's pinned sources (no tvOS packages exist). The first
++# configure downloads them and Dawn's own dependencies, so it needs network access and python3.
++"$cmake_bin" -S "$workspace/runtime" -B "$native_build" -G Ninja \
++    -DCMAKE_BUILD_TYPE=Release \
++    -DCMAKE_SYSTEM_NAME=tvOS \
++    -DCMAKE_OSX_SYSROOT="$sysroot" \
++    -DCMAKE_OSX_ARCHITECTURES=arm64 \
++    -DCMAKE_OSX_DEPLOYMENT_TARGET="$deployment_target" \
++    -DCMAKE_C_COMPILER="$cc_bin" \
++    -DCMAKE_CXX_COMPILER="$cxx_bin" \
++    -DCMAKE_OBJC_COMPILER="$cc_bin" \
++    -DCMAKE_OBJCXX_COMPILER="$cxx_bin" \
++    -DCMAKE_MAKE_PROGRAM="$ninja_bin" \
++    -DMKW_TRANSLATED_COMPILE_JOBS="$translated_jobs" \
++    -DMKW_TVOS_CPU="$cpu" \
++    -DMKW_TVOS_BUNDLE_IDENTIFIER="$bundle_id" \
++    -DAURORA_SDL3_PROVIDER=vendor \
++    -DAURORA_DAWN_PROVIDER=vendor \
++    -DMKW_SETUP_VERSION="$setup_version"
++mkw_write_identity "$toolchain_provenance" ToolchainFingerprint "$toolchain_fingerprint"
++step compile 'Compiling WiiCompiled for tvOS'
++"$cmake_bin" --build "$native_build" --target WiiCompiled --parallel "$global_jobs"
++
++# ---------------------------------------------------------------- app bundle
++built_app="$native_build/WiiCompiled.app"
++assert_file "$built_app/WiiCompiled" 'built tvOS executable'
++assert_file "$built_app/Info.plist" 'built Info.plist'
++for asset in dsp_coef.bin initial_pipeline_cache.db cacert.pem; do
++    assert_file "$built_app/$asset" "bundled runtime asset $asset"
++done
++assert_dir "$built_app/wii_bootstrap" 'bundled Wii first-run bootstrap'
++lipo -archs "$built_app/WiiCompiled" 2>/dev/null | grep -qw arm64 || fail 'the built executable is not arm64'
++
++step bundle 'Assembling WiiCompiled.app with the extracted game data'
++mkdir -p "$output_dir"
++output_dir=$(cd "$output_dir" && pwd)
++app="$output_dir/WiiCompiled.app"
++mkdir -p "$app"
++# DATA is excluded from the first pass, which also protects it from --delete; the second pass
++# mirrors it incrementally so a rebuild does not recopy gigabytes of unchanged game files.
++rsync -a --delete --exclude '/DATA' --exclude '/_CodeSignature' --exclude '/embedded.mobileprovision' "$built_app/" "$app/"
++rsync -a --delete "$assets/DATA/" "$app/DATA/"
++rm -rf "$app/_CodeSignature" "$app/embedded.mobileprovision"
++bundle_kib=$(du -sk "$app" | awk '{print $1}')
++note "WiiCompiled.app is $(( bundle_kib / 1024 )) MiB"
++if (( bundle_kib > 4 * 1024 * 1024 )); then
++    note 'warning: the app is larger than the 4 GiB tvOS app size limit; installation may be refused'
++fi
++
++# ---------------------------------------------------------------- signing
++plist_value() { /usr/libexec/PlistBuddy -c "Print :$2" "$1" 2>/dev/null; }
++
++# Decodes a provisioning profile into $1 (an XML plist). $2 = .mobileprovision.
++decode_profile() { security cms -D -i "$2" > "$1" 2>/dev/null; }
++
++# Succeeds when the decoded profile $1 is an unexpired tvOS profile for $bundle_id.
++profile_matches() {
++    local plist=$1 platforms team app_id pattern expiry expiry_epoch
++    platforms=$(plist_value "$plist" Platform) || return 1
++    grep -q 'tvOS' <<<"$platforms" || return 1
++    team=$(plist_value "$plist" TeamIdentifier:0) || return 1
++    app_id=$(plist_value "$plist" Entitlements:application-identifier) || return 1
++    pattern=${app_id#"$team."}
++    if [[ "$pattern" == "*" ]]; then :;
++    elif [[ "$pattern" == *'*' ]]; then [[ "$bundle_id" == "${pattern%\*}"* ]] || return 1;
++    else [[ "$pattern" == "$bundle_id" ]] || return 1; fi
++    expiry=$(plutil -extract ExpirationDate raw -o - "$plist" 2>/dev/null) || return 1
++    expiry_epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$expiry" +%s 2>/dev/null) || return 1
++    (( expiry_epoch > $(date +%s) ))
++}
++
++sign_work=$(mktemp -d "${TMPDIR:-/tmp}/wiicompiled-tvos-sign.XXXXXX")
++cleanup() { rm -rf "$sign_work"; }
++trap cleanup EXIT
++
++if (( no_sign )); then
++    note 'Leaving WiiCompiled.app unsigned (--no-sign)'
++elif (( simulator )); then
++    step sign 'Ad-hoc signing for the Apple TV Simulator'
++    codesign --force --sign - --timestamp=none "$app"
++elif (( adhoc_sign )); then
++    # No Apple account involved: a sideloading tool replaces this signature with one made from
++    # the user's Apple ID when it installs the app.
++    step sign 'Ad-hoc signing WiiCompiled.app for a re-signing sideload tool'
++    codesign --force --sign - --timestamp=none "$app"
++else
++    step sign 'Signing WiiCompiled.app for Apple TV'
++    profile_plist="$sign_work/profile.plist"
++    if [[ -n "$profile_path" ]]; then
++        assert_file "$profile_path" 'provisioning profile'
++        decode_profile "$profile_plist" "$profile_path" || fail "could not decode $profile_path"
++        profile_matches "$profile_plist" || fail "$profile_path is not an unexpired tvOS profile covering $bundle_id"
++    else
++        # Exact App IDs win over wildcards; among equals, the newest file wins.
++        best=""; best_rank=0
++        for dir in "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles" "$HOME/Library/MobileDevice/Provisioning Profiles"; do
++            [[ -d "$dir" ]] || continue
++            for candidate in "$dir"/*.mobileprovision; do
++                [[ -f "$candidate" ]] || continue
++                decode_profile "$sign_work/candidate.plist" "$candidate" || continue
++                profile_matches "$sign_work/candidate.plist" || continue
++                candidate_team=$(plist_value "$sign_work/candidate.plist" TeamIdentifier:0)
++                candidate_app_id=$(plist_value "$sign_work/candidate.plist" Entitlements:application-identifier)
++                if [[ "$candidate_app_id" == "$candidate_team.$bundle_id" ]]; then rank=2; else rank=1; fi
++                if (( rank > best_rank )) || { (( rank == best_rank )) && [[ "$candidate" -nt "$best" ]]; }; then
++                    best=$candidate; best_rank=$rank
++                fi
++            done
++        done
++        [[ -n "$best" ]] || fail "no unexpired tvOS provisioning profile covers $bundle_id; see docs/building-tvos.md (\"Signing\") or pass --provisioning-profile"
++        profile_path=$best
++        decode_profile "$profile_plist" "$profile_path"
++    fi
++    team=$(plist_value "$profile_plist" TeamIdentifier:0)
++    note "Provisioning profile: $profile_path (team $team)"
++
++    if [[ -z "$sign_identity" ]]; then
++        identities=$(security find-identity -v -p codesigning)
++        index=0
++        while plutil -extract "DeveloperCertificates.$index" raw -o - "$profile_plist" > "$sign_work/cert.b64" 2>/dev/null; do
++            sha1=$(base64 -D -i "$sign_work/cert.b64" | shasum -a 1 | awk '{print toupper($1)}')
++            if grep -q "$sha1" <<<"$identities"; then sign_identity=$sha1; break; fi
++            index=$(( index + 1 ))
++        done
++        [[ -n "$sign_identity" ]] || fail "none of the profile's certificates has a private key in your keychain; pass --sign-identity or let Xcode repair signing"
++    fi
++
++    entitlements="$sign_work/entitlements.plist"
++    /usr/libexec/PlistBuddy -x -c 'Print :Entitlements' "$profile_plist" > "$entitlements" || fail 'could not read the profile entitlements'
++    # A wildcard profile grants "TEAM.*"; the signed app must name its concrete App ID.
++    /usr/libexec/PlistBuddy -c "Set :application-identifier $team.$bundle_id" "$entitlements"
++    cp "$profile_path" "$app/embedded.mobileprovision"
++    codesign --force --sign "$sign_identity" --entitlements "$entitlements" --generate-entitlement-der --timestamp=none "$app"
++fi
++if (( ! no_sign )); then
++    codesign --verify --strict "$app" || fail 'code signature verification failed'
++fi
++
++# ---------------------------------------------------------------- ipa
++if (( make_ipa )); then
++    step ipa 'Packaging WiiCompiled.ipa'
++    ipa="$output_dir/WiiCompiled.ipa"
++    ipa_stage="$output_dir/.ipa-stage"
++    rm -rf "$ipa_stage" "$ipa"
++    mkdir -p "$ipa_stage/Payload"
++    # A hard-linked copy keeps the multi-gigabyte game data from being duplicated on disk.
++    cp -Rl "$app" "$ipa_stage/Payload/" 2>/dev/null || ditto "$app" "$ipa_stage/Payload/WiiCompiled.app"
++    # --keepParent stores the entries as Payload/WiiCompiled.app/..., the IPA layout; ditto
++    # writes Zip64 entries when the archive passes 4 GiB.
++    ditto -c -k --norsrc --keepParent "$ipa_stage/Payload" "$ipa"
++    rm -rf "$ipa_stage"
++    note "WiiCompiled.ipa is $(( $(stat -f %z "$ipa") / 1024 / 1024 )) MiB"
++    printf 'MKWCBUILD:IPA=%s\n' "$ipa"
++fi
++
++# ---------------------------------------------------------------- install
++if (( install )); then
++    if (( simulator )); then
++        step install 'Installing on the booted Apple TV Simulator'
++        xcrun simctl install booted "$app" || fail 'install failed; boot an Apple TV simulator first (Xcode > Window > Devices and Simulators)'
++        if (( launch )); then xcrun simctl launch booted "$bundle_id"; fi
++    else
++        step install "Installing on $device"
++        xcrun devicectl device install app --device "$device" "$app"
++        if (( launch )); then xcrun devicectl device process launch --device "$device" "$bundle_id"; fi
++    fi
++fi
++
++note 'The app contains your own game data. Never share or upload it.'
++printf 'MKWCBUILD:APP=%s\n' "$app"
+diff --git a/Launcher/tvos/encrypt-game-data.sh b/Launcher/tvos/encrypt-game-data.sh
+new file mode 100755
+index 0000000..dff9ce7
+--- /dev/null
++++ b/Launcher/tvos/encrypt-game-data.sh
+@@ -0,0 +1,43 @@
++#!/usr/bin/env bash
++# Packs an extracted Mario Kart Wii DATA folder (files/ + sys/) into AES-256 encrypted parts that the
++# GitHub tvOS workflow (.github/workflows/tvos.yml) downloads from the release tagged `game-data`.
++# The key never leaves your machine except as the MKW_DATA_KEY repository secret.
++#
++# Usage: encrypt-game-data.sh DATA_DIR OUT_DIR KEY_FILE
++#   DATA_DIR  the extracted disc's DATA folder (must be named DATA and contain sys/ and files/)
++#   OUT_DIR   where mkw-data.tar.enc.part-* are written (keep it outside synced folders)
++#   KEY_FILE  created with a fresh random key if it does not exist yet; keep it - fetch-ipa.sh
++#             needs the same key to decrypt finished builds
++# Runs in Git Bash on Windows, and on macOS/Linux. Needs tar, openssl and split.
++set -euo pipefail
++
++fail() { printf 'encrypt-game-data.sh: error: %s\n' "$*" >&2; exit 1; }
++(( $# == 3 )) || fail 'usage: encrypt-game-data.sh DATA_DIR OUT_DIR KEY_FILE'
++data_dir=${1%/}; out_dir=$2; key_file=$3
++
++[[ "$(basename "$data_dir")" == DATA ]] || fail "the folder must be named DATA (got $(basename "$data_dir"))"
++for required in sys/boot.bin sys/fst.bin sys/main.dol files/rel/StaticR.rel; do
++    [[ -f "$data_dir/$required" ]] || fail "$data_dir/$required is missing; is this an extracted Wii disc?"
++done
++for tool in tar openssl split; do command -v "$tool" >/dev/null || fail "required tool not found: $tool"; done
++
++mkdir -p "$out_dir" "$(dirname "$key_file")"
++if [[ ! -s "$key_file" ]]; then
++    # Written with printf so the file holds the key and a plain LF on every platform.
++    (umask 077; printf '%s\n' "$(openssl rand -hex 32 | tr -d '\r\n')" > "$key_file")
++    printf 'Created a new key: %s\n' "$key_file"
++fi
++# Line endings are stripped and the key is handed over through the environment, exactly as the
++# workflow receives it from the MKW_DATA_KEY secret (openssl's file: source would keep a CR).
++MKW_DATA_KEY=$(head -n 1 "$key_file" | tr -d '\r\n')
++export MKW_DATA_KEY
++[[ "$MKW_DATA_KEY" =~ ^[0-9a-f]{64}$ ]] || fail "$key_file does not hold a 64-character hex key"
++
++rm -f "$out_dir"/mkw-data.tar.enc.part-*
++printf 'Packing and encrypting %s ...\n' "$data_dir"
++# Parts stay under GitHub's 2 GiB limit for one release asset.
++tar -C "$(dirname "$data_dir")" -cf - DATA \
++    | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -salt -pass env:MKW_DATA_KEY \
++    | split -b 1900m - "$out_dir/mkw-data.tar.enc.part-"
++ls -l "$out_dir"/mkw-data.tar.enc.part-*
++printf 'Done. Upload the parts above to the release `game-data`; set MKW_DATA_KEY from %s.\n' "$key_file"
+diff --git a/Launcher/tvos/fetch-ipa.sh b/Launcher/tvos/fetch-ipa.sh
+new file mode 100755
+index 0000000..483623f
+--- /dev/null
++++ b/Launcher/tvos/fetch-ipa.sh
+@@ -0,0 +1,46 @@
++#!/usr/bin/env bash
++# Downloads an encrypted tvOS build published by .github/workflows/tvos.yml and decrypts it into
++# WiiCompiled.ipa, ready for a sideloading tool such as atvloadly.
++#
++# Usage: fetch-ipa.sh KEY_FILE OUT_DIR [TAG]
++#   KEY_FILE  the key encrypt-game-data.sh created
++#   OUT_DIR   where WiiCompiled.ipa is written
++#   TAG       a release such as tvos-3 (default: the newest tvos-* release)
++# Run it inside this repository's clone (the GitHub repository is taken from its origin remote).
++# Runs in Git Bash on Windows, and on macOS/Linux. Needs gh (logged in), openssl and cat.
++set -euo pipefail
++
++fail() { printf 'fetch-ipa.sh: error: %s\n' "$*" >&2; exit 1; }
++(( $# == 2 || $# == 3 )) || fail 'usage: fetch-ipa.sh KEY_FILE OUT_DIR [TAG]'
++key_file=$1; out_dir=$2; tag=${3:-}
++
++gh_bin=$(command -v gh || true)
++if [[ -z "$gh_bin" && -x "/c/Program Files/GitHub CLI/gh.exe" ]]; then gh_bin="/c/Program Files/GitHub CLI/gh.exe"; fi
++[[ -n "$gh_bin" ]] || fail 'the GitHub CLI (gh) is not installed'
++command -v openssl >/dev/null || fail 'openssl not found'
++[[ -s "$key_file" ]] || fail "key file not found: $key_file"
++MKW_DATA_KEY=$(head -n 1 "$key_file" | tr -d '\r\n')
++export MKW_DATA_KEY
++[[ "$MKW_DATA_KEY" =~ ^[0-9a-f]{64}$ ]] || fail "$key_file does not hold a 64-character hex key"
++
++script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
++repo=$(git -C "$script_dir" remote get-url origin 2>/dev/null | sed -E 's#^.*github\.com[:/]##; s#\.git$##')
++[[ -n "$repo" ]] || fail 'could not tell the GitHub repository from the origin remote'
++
++if [[ -z "$tag" ]]; then
++    tag=$("$gh_bin" release list --repo "$repo" --limit 50 --json tagName,createdAt \
++        --jq '[.[] | select(.tagName | startswith("tvos-"))] | sort_by(.createdAt) | last | .tagName // empty')
++    [[ -n "$tag" ]] || fail "no tvos-* release in $repo yet; run the tvOS build workflow first"
++fi
++
++mkdir -p "$out_dir"
++work=$(mktemp -d "${TMPDIR:-/tmp}/wiicompiled-ipa.XXXXXX")
++trap 'rm -rf "$work"' EXIT
++printf 'Downloading %s from %s ...\n' "$tag" "$repo"
++"$gh_bin" release download "$tag" --repo "$repo" --dir "$work" --pattern 'WiiCompiled.ipa.enc.part-*'
++printf 'Decrypting ...\n'
++cat "$work"/WiiCompiled.ipa.enc.part-* \
++    | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -pass env:MKW_DATA_KEY \
++    > "$out_dir/WiiCompiled.ipa"
++ls -l "$out_dir/WiiCompiled.ipa"
++printf 'Ready: %s - install it with atvloadly. It contains your game; do not share it.\n' "$out_dir/WiiCompiled.ipa"
+diff --git a/README.md b/README.md
+index 5e71e3b..dd8633a 100644
+--- a/README.md
++++ b/README.md
+@@ -180,6 +180,9 @@ translation, generating the manifest and build graph, and compiling, see [`trans
+ 
+ For a step-by-step guide on compiling both WiiCompiled and Retro Rewind from source on macOS (Apple Silicon), see the [macOS Build Guide](docs/building-macos.md).
+ 
++To build the base game for **Apple TV** (Apple TV HD and later, built on a Mac with Xcode), see the
++[tvOS Build Guide](docs/building-tvos.md). The tvOS port is untested on hardware so far.
++
+ ## FAQ
+ 
+ **Is this an emulator?**
+diff --git a/docs/building-tvos.md b/docs/building-tvos.md
+new file mode 100644
+index 0000000..1e87db0
+--- /dev/null
++++ b/docs/building-tvos.md
+@@ -0,0 +1,231 @@
++# Building WiiCompiled for Apple TV (tvOS)
++
++This port builds the **base game** (`WiiCompiled`, Mario Kart Wii) as a native Apple TV app.
++The primary target is the **Apple TV HD** (A8, 2 GiB RAM). The same build also runs on every
++Apple TV 4K, and you can build a faster 4K-only variant with `--cpu` (see below).
++
++As on every other platform, there is no Nintendo code or data in this repository. The build runs
++on your Mac against your own disc image and places your extracted game files inside the app. **The
++resulting `.app` contains your copy of the game: never share or upload it.**
++
++> [!WARNING]
++> **Status: untested on hardware.** The port was written and statically checked without a Mac or an
++> Apple TV. The tvOS-specific C++ was type-checked with a Clang front end against stand-in headers,
++> the Dawn patch was applied to the pinned Dawn source, and every CMake file was parse-checked.
++> It has **not** yet been compiled with Xcode's tvOS SDK or run on an Apple TV. Expect the first
++> build to surface issues, and report them with the full build log.
++>
++> **Performance on the Apple TV HD is unknown and may be below full speed.** Its dual-core 1.5 GHz
++> A8 is far below the desktop minimum in the README, and tvOS forces every guest memory access through
++> the checked path (see [How the port works](#how-the-port-works)). Apple TV 4K models have
++> much more headroom.
++
++## What you need
++
++| Requirement | Notes |
++| --- | --- |
++| A Mac with **Xcode** (not just the Command Line Tools) | Install the **tvOS** platform: Xcode > Settings > Components. Xcode 15 or later; Xcode 16+ recommended. |
++| CMake ≥ 3.25, Ninja, .NET 8 SDK | `brew install cmake ninja` and `brew install --cask dotnet-sdk@8` |
++| `python3` and `git` | Both ship with Xcode. The first configure downloads Dawn, SDL3 and Dawn's dependencies, so it needs network access. |
++| [nodtool](https://github.com/encounter/nod/releases) | Extracts your disc image, exactly as in [the macOS guide](building-macos.md). |
++| A clean **PAL `RMCP01`, NTSC-U `RMCE01` or NTSC-J `RMCJ01`** disc image you dumped yourself | Same hash-pinned releases as every other platform. |
++| An Apple TV on **tvOS 15 or later**, paired with Xcode | Apple TV: Settings > Remotes and Devices > Remote App and Devices. Mac: Xcode > Window > Devices and Simulators > select the Apple TV > Pair. |
++| An Apple ID in Xcode | A free Personal Team works, but its provisioning profiles expire after 7 days (re-sign and reinstall). A paid account lasts a year. |
++| A **game controller** | MFi, Xbox Wireless or PlayStation (DualShock 4 / DualSense) controller, paired in the Apple TV's Bluetooth settings. The Siri Remote alone cannot play the game. |
++
++About 20 GB of free disk space is needed during the build. The finished app is about as large as your
++extracted `Assets/DATA` folder plus the game executable; the build warns if it exceeds tvOS's 4 GB
++app size limit.
++
++## 1. Get the port onto the Mac
++
++The port is not part of the upstream repository. It lives in this working tree, and it is also
++exported as two patches in `tvos-port-patches/`. Use either route:
++
++**A. Copy this whole folder to the Mac.** Include the hidden `.git` folder and `aurora-main/`
++(a git submodule that carries part of the port). Copy the files byte for byte: the shell scripts
++need their LF line endings and break with Windows (CRLF) line endings.
++
++**B. Apply the patches to a fresh clone** of the exact upstream revision they were made against:
++
++```bash
++git clone https://github.com/patchzyy/Wiicompiled.git
++cd Wiicompiled
++git checkout 0d5c402d0366640a294bf9c699068299591f7eff
++git submodule update --init   # aurora-main at 33067e34a17ca680eb961d9e0f3d48ddb22a7d7f
++git apply /path/to/tvos-port-patches/wiicompiled-tvos.patch
++git -C aurora-main apply /path/to/tvos-port-patches/aurora-tvos.patch
++```
++
++## 2. Create a provisioning profile (device builds only)
++
++The app is signed with a development profile that covers its bundle identifier and your Apple TV.
++The simplest way to get one is to let Xcode create it once:
++
++1. In Xcode: File > New > Project > **tvOS** > **App**. Any name works.
++2. Set **Team** to your Apple ID's team and **Bundle Identifier** to the identifier you will build
++   with, for example `com.yourname.wiicompiled`.
++3. Pick your Apple TV as the run destination and press Run once. Xcode registers the device and
++   writes the profile to `~/Library/Developer/Xcode/UserData/Provisioning Profiles`.
++
++The build script finds that profile automatically. It also picks the certificate in your keychain
++that the profile names, so you normally pass only `--bundle-id`.
++
++## 3. Build, sign and install
++
++Find your Apple TV's identifier:
++
++```bash
++xcrun devicectl list devices
++```
++
++Then build and install (run the script through `bash`; the executable bit may not survive a copy):
++
++```bash
++bash Launcher/tvos/build-tvos.command \
++  --game /path/to/RMCP01.iso \
++  --nodtool ./nodtool \
++  --bundle-id com.yourname.wiicompiled \
++  --output-dir build-tvos/Products \
++  --install --device "<your Apple TV identifier>" --launch
++```
++
++The first run translates the game and builds Dawn from source, so it takes a while. Later runs reuse
++the translation and the native build. `--game`/`--nodtool` can be dropped once `Assets/` holds a
++verified extraction.
++
++Useful options (`--help` lists all of them):
++
++| Option | Effect |
++| --- | --- |
++| `--cpu apple-a10` / `apple-a12` / `apple-a15` | Tune for Apple TV 4K (1st / 2nd / 3rd generation). The result **does not run on an Apple TV HD**. The default, `apple-a8`, runs on every Apple TV. |
++| `--simulator` | Build for the Apple TV Simulator on an Apple Silicon Mac. It is ad-hoc signed, and `--install --launch` targets the booted simulator. The simulator renders on the Mac's GPU, so it is no stand-in for A8 performance or GPU limits. |
++| `--provisioning-profile PATH`, `--sign-identity ID` | Choose the profile or certificate yourself. |
++| `--no-sign` | Leave the app unsigned, for example to sign it with your own tooling. |
++| `--deployment-target 17.0` | Raise the minimum tvOS version (default 15.0). |
++
++`xcrun devicectl` needs Xcode 15+ and an Apple TV on tvOS 17 or later. On older tvOS versions, install
++`build-tvos/Products/WiiCompiled.app` from Xcode's Devices and Simulators window (the **+** under
++Installed Apps).
++
++## Building on GitHub instead (no Mac)
++
++`.github/workflows/tvos.yml` runs the same build on a GitHub-hosted Mac and produces a
++`WiiCompiled.ipa` for a sideloading tool such as [atvloadly](https://github.com/bitxeno/atvloadly),
++which signs it with your Apple ID and installs it, so no Mac is needed at any point.
++
++Your game data never enters the repository and never sits unencrypted on GitHub:
++
++1. **Encrypt your extracted disc** (a `DATA` folder with `files/` and `sys/`) on your own computer.
++   This creates a random key file the first time; keep it, since you need it to decrypt builds:
++   ```bash
++   bash Launcher/tvos/encrypt-game-data.sh /path/to/DATA ~/wiicompiled-tvos/upload ~/wiicompiled-tvos/key.txt
++   ```
++2. **Upload the encrypted parts** to a release tagged `game-data`, and store the key as the
++   `MKW_DATA_KEY` repository secret:
++   ```bash
++   gh release create game-data ~/wiicompiled-tvos/upload/mkw-data.tar.enc.part-* --title "Encrypted game data" --notes "AES-256; key is the MKW_DATA_KEY secret"
++   gh secret set MKW_DATA_KEY --body "$(tr -d '\r\n' < ~/wiicompiled-tvos/key.txt)"
++   ```
++3. **Run the workflow:** Actions > **tvOS build** > Run workflow (or `gh workflow run tvos.yml`).
++   It decrypts the data on the build machine, builds an ad-hoc signed app, and publishes the `.ipa`,
++   encrypted with the same key, as a release named `tvos-<run number>`.
++4. **Download and decrypt the build:**
++   ```bash
++   bash Launcher/tvos/fetch-ipa.sh ~/wiicompiled-tvos/key.txt ~/wiicompiled-tvos
++   ```
++   Then install `~/wiicompiled-tvos/WiiCompiled.ipa` with atvloadly.
++
++Things to know:
++- On a **private** repository the GitHub Free plan includes roughly 200 macOS build minutes a month
++  (macOS minutes count ten times). A full build may not fit; public repositories have no minute
++  limit, and the encryption above is what keeps the game private there.
++- GitHub's Macs are small (3 cores, 7 GB of RAM) and a job may run at most 6 hours, so the first
++  build is slow and may need tuning.
++- atvloadly's limits: a free Apple ID keeps at most 3 sideloaded apps active and needs 2FA for each
++  login; you must re-pair after tvOS updates; it documents no maximum app size, and this app is about
++  3 GB. Its Docker host needs `avahi-daemon`, and it has no login of its own, so keep it on a trusted
++  network.
++
++## Controls
++
++- **Playing:** a controller is mapped to the GameCube controller, exactly as on desktop builds.
++  Mapping, rumble and the other options live in the settings bar.
++- **Settings bar** (the desktop's F10): press the controller's **View / Share / Create** button
++  (the "Select" position; on MFi pads it is called Options) or **Play/Pause** on the Siri Remote.
++  Move with the D-pad or the remote's arrows, confirm with **A** or **Select**, go back with **B**
++  or **Menu**. The game's input is paused while the bar is open.
++- **Siri Remote Menu** during play opens the exit prompt (the desktop's Escape). The **TV** button
++  returns to the Home screen as usual.
++- The Siri Remote never takes a player slot. Its arrows and Select reach the game through the
++  keyboard bindings, which can be changed in the settings bar.
++- **Wii Remotes are not supported:** tvOS only lets apps use controllers the system manages
++  through the GameController framework.
++
++## Where the app keeps its data
++
++tvOS gives apps no persistent storage beyond a small key-value store, so everything the game writes
++lives in the app container's `Library/Caches/WiiCompiled`:
++
++| Path | Contents |
++| --- | --- |
++| `NAND/` | The emulated Wii NAND, including **your save data** |
++| `Config.toml` | Settings (written by the settings bar; there is no way to edit it by hand on the device) |
++| `Cache/` | Renderer pipeline cache |
++| `Logs/` | Run logs and crash reports |
++
++The data survives app updates. tvOS may **purge** it when the Apple TV runs very low on storage, and
++deleting the app removes it. If Xcode's Devices and Simulators window offers **Download Container**
++for the app, use it to back up your saves and to collect logs for bug reports.
++
++The game files themselves are read from `WiiCompiled.app/DATA`. Setting `paths.dvd_root` in
++`Config.toml` still overrides that location.
++
++## Not supported on tvOS
++
++- **Retro Rewind.** The Retro Rewind product builds, but its pack expects a writable folder (an app
++  bundle is read-only) and the port has not been designed or tested for it.
++- **Wii Remotes**, **Discord presence**, **Steam Input** and **MetalFX upscaling** (no Apple TV GPU
++  older than Apple7 supports MetalFX).
++- **Building on Windows or Linux.** Apple's tvOS SDK and code signing only exist on macOS.
++
++## How the port works
++
++The translator, the translated game code and almost all of the runtime are identical to the desktop
++builds. The tvOS-specific pieces:
++
++- **Guest memory.** Desktop builds reserve a fixed 4 GiB virtual range so that every guest address
++  maps directly to a host address. A tvOS process cannot get that range: arm64 Darwin maps a 4 GiB
++  `__PAGEZERO`, and a 2 GiB Apple TV HD leaves only a few GiB of user address space in total. On tvOS
++  `GuestFlat::RequiresCheckedAccess()` is therefore a compile-time `true`. Every guest load and store,
++  including the translator's `FlatWriteRam*` stores, goes through the existing checked page-table
++  path (`Memory::*`), backed by per-region stores with the same MEM1/MEM2 mirroring as macOS
++  (`runtime/src/platform/tvos/guest_flat_memory_tvos.cpp`). This needs no entitlement and costs
++  some speed.
++- **Start-up and stack.** UIKit has to own the process, so `main()` hands control to SDL
++  (`SDL_RunApp`). The guest's main thread runs on the host main thread's stack, which tvOS limits to
++  1 MiB (macOS and Linux give it 8 MiB). The runtime is therefore started on an 8 MiB stack, still on
++  the main thread, using the same AArch64 context switch the guest fibers use
++  (`runtime/src/platform/tvos/tvos_app.cpp`).
++- **CPU target.** Desktop AArch64 builds use `-mcpu=native`, which on a Mac would describe the Mac's
++  CPU. tvOS builds use `-mcpu=apple-a8` (`MKW_TVOS_CPU`).
++- **Graphics.** aurora's Metal path runs unchanged. Dawn and SDL3 are built from aurora's pinned
++  sources. A small patch (`aurora-main/cmake/patches/apply-dawn-tvos-gpu-family.cmake`) makes Dawn
++  query the GPU family on tvOS: the A8 is Metal family Apple2 and lacks base-vertex/base-instance
++  draws and sampler compare functions, which Dawn otherwise assumes every Apple TV has.
++- **Audio.** Music ducking uses `AVAudioSession.secondaryAudioShouldBeSilencedHint`
++  (`external_audio_tvos.mm`) instead of macOS Core Audio process objects.
++- **Paths.** User data lives in `Library/Caches` (`runtime/src/platform/host_platform.cpp`), and the
++  DVD root defaults to the `DATA` folder inside the app bundle (`runtime/include/runtime_config.h`).
++
++## Troubleshooting
++
++- **"the appletvos SDK was not found"**: install the tvOS platform in Xcode and select Xcode with
++  `sudo xcode-select -s /Applications/Xcode.app`.
++- **"no unexpired tvOS provisioning profile covers …"**: redo step 2 with the same bundle identifier,
++  or pass `--provisioning-profile`.
++- **The app starts and closes immediately**: download the app container (see above) and read the newest
++  file in `Library/Caches/WiiCompiled/Logs`, or watch the device console in Console.app while
++  launching.
++- **A configure error mentioning `apply-dawn-tvos-gpu-family.cmake`**: the pinned Dawn revision
++  changed. Update the anchors in that patch to the new source.
+diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
+index f0d4fd4..b25e8a0 100644
+--- a/runtime/CMakeLists.txt
++++ b/runtime/CMakeLists.txt
+@@ -5,8 +5,15 @@ cmake_minimum_required(VERSION 3.25)
+ # accidentally inherit the running SDK's deployment version. This cache entry
+ # is harmless on non-Apple platforms and remains overridable by a caller.
+ if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+-    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
+-        "Minimum macOS version supported by WiiCompiled" FORCE)
++    if(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
++        # tvOS 15 is the release contemporary with macOS 12, so the libc++
++        # availability floor the runtime is written against is the same.
++        set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING
++            "Minimum tvOS version supported by WiiCompiled" FORCE)
++    else()
++        set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
++            "Minimum macOS version supported by WiiCompiled" FORCE)
++    endif()
+ endif()
+ project(mkw_recompiled)
+ 
+@@ -28,6 +35,16 @@ endif()
+ 
+ if(WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+     set(MKW_PLATFORM_WINDOWS TRUE)
++elseif(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
++    # Apple TV (device, or the arm64 Apple TV Simulator on Apple Silicon). Must
++    # precede the macOS branch: APPLE is true for every Darwin target.
++    # See docs/building-tvos.md and Launcher/tvos/build-tvos.command.
++    if(NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
++        message(FATAL_ERROR
++            "WiiCompiled for tvOS supports arm64 only; configure with -DCMAKE_OSX_ARCHITECTURES=arm64 "
++            "(got '${CMAKE_OSX_ARCHITECTURES}')")
++    endif()
++    set(MKW_PLATFORM_TVOS TRUE)
+ elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|arm64|ARM64)$")
+     set(MKW_PLATFORM_MACOS TRUE)
+     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
+@@ -39,7 +56,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(
+     set(MKW_PLATFORM_LINUX TRUE)
+ else()
+     message(FATAL_ERROR
+-        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS x86_64/arm64")
++        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS x86_64/arm64 and tvOS arm64")
++endif()
++
++if(MKW_PLATFORM_TVOS)
++    # external_audio_tvos.mm talks to AVAudioSession.
++    enable_language(OBJCXX)
++    # Neither Dawn nor SDL3 publishes a tvOS package, and a host (macOS) build
++    # must never be picked up by find_package, so both are built from aurora's
++    # pinned sources. Plain cache defaults: an explicit -D still wins.
++    set(AURORA_DAWN_PROVIDER "vendor" CACHE STRING
++        "How to provide Dawn: auto, vendor (build from source), system (find_package/imported), package (download prebuilt)")
++    set(AURORA_SDL3_PROVIDER "vendor" CACHE STRING
++        "How to provide SDL3: auto, vendor (build from source), system (find_package/imported), or package (download prebuilt)")
++    set(MKW_TVOS_BUNDLE_IDENTIFIER "local.wiicompiled.tvos" CACHE STRING
++        "CFBundleIdentifier of the tvOS app; must match the provisioning profile used to sign it")
+ endif()
+ 
+ if(MKW_PLATFORM_WINDOWS)
+@@ -236,7 +267,7 @@ else()
+         set(DAWN_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
+         set(DAWN_ENABLE_METAL OFF CACHE BOOL "" FORCE)
+         set(TINT_BUILD_HLSL_WRITER ON CACHE BOOL "" FORCE)
+-    elseif(MKW_PLATFORM_MACOS)
++    elseif(MKW_PLATFORM_MACOS OR MKW_PLATFORM_TVOS)
+         set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
+         set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
+         set(DAWN_ENABLE_METAL ON CACHE BOOL "" FORCE)
+@@ -344,7 +375,25 @@ endif()
+ # a registration file is silently never compiled and never errors. The stale-glob
+ # failure mode is worth far more than the milliseconds.
+ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+-if(MKW_PLATFORM_MACOS)
++if(MKW_PLATFORM_TVOS)
++    # src/platform/tvos/ replaces the host services tvOS cannot provide: the
++    # 4 GiB flat guest view (guest_flat_memory_tvos.cpp), Core Audio process
++    # objects (external_audio_tvos.mm, built in cmake/PublicProducts.cmake) and
++    # posix_spawn (steam_input_layout_tvos.cpp). Guest fibers use the same
++    # x18-safe Darwin AArch64 context switch as Apple Silicon macOS.
++    list(REMOVE_ITEM SOURCES
++        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp"
++        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp"
++        "${CMAKE_CURRENT_LIST_DIR}/src/external_audio_macos.cpp"
++        "${CMAKE_CURRENT_LIST_DIR}/src/steam_input_layout.cpp")
++    file(GLOB MKW_TVOS_PLATFORM_SOURCES CONFIGURE_DEPENDS
++        "${CMAKE_CURRENT_LIST_DIR}/src/platform/tvos/*.cpp")
++    # Self-contained translation units; keep them out of the runtime's unity
++    # batches so their file-local names can never collide with a neighbour's.
++    set_source_files_properties(${MKW_TVOS_PLATFORM_SOURCES} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
++    enable_language(ASM)
++    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
++elseif(MKW_PLATFORM_MACOS)
+     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
+     if(MKW_PLATFORM_MACOS_ARM64)
+         # HostContext's Apple Silicon backend is implemented in a small assembly
+@@ -357,6 +406,10 @@ if(MKW_PLATFORM_MACOS)
+ else()
+     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
+ endif()
++if(NOT MKW_PLATFORM_TVOS)
++    # Apple TV host services (each file also compiles to nothing off tvOS).
++    list(FILTER SOURCES EXCLUDE REGEX "/src/platform/tvos/")
++endif()
+ set(MKW_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/platform/host_platform.cpp")
+ set(MKW_BASE_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp")
+ set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro_rewind_product.cpp")
+@@ -367,7 +420,11 @@ set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp
+ list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_SOURCE}
+      ${MKW_CPU_BASELINE_SOURCE} ${MKW_PLATFORM_SOURCE})
+ 
+-include("${CMAKE_CURRENT_LIST_DIR}/cmake/PlatformTests.cmake")
++# The host-contract tests run on the build machine. A tvOS build is a cross
++# build whose binaries only run on an Apple TV, so it has none to offer.
++if(NOT MKW_PLATFORM_TVOS)
++    include("${CMAKE_CURRENT_LIST_DIR}/cmake/PlatformTests.cmake")
++endif()
+ 
+ set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
+ include("${CMAKE_CURRENT_LIST_DIR}/cmake/RuntimeLibrary.cmake")
+diff --git a/runtime/cmake/PublicProducts.cmake b/runtime/cmake/PublicProducts.cmake
+index 809f22e..36aafcc 100644
+--- a/runtime/cmake/PublicProducts.cmake
++++ b/runtime/cmake/PublicProducts.cmake
+@@ -35,6 +35,55 @@ if(MKW_PLATFORM_MACOS)
+     find_library(MKW_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+ endif()
+ 
++if(MKW_PLATFORM_TVOS)
++    # The one Objective-C++ runtime source (AVAudioSession). It is kept out of
++    # mkw_runtime_common so the runtime's C++ unity batches and precompiled
++    # header never have to be generated for Objective-C++.
++    add_library(mkw_tvos_objc STATIC
++        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/external_audio_tvos.mm")
++    target_include_directories(mkw_tvos_objc PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include")
++    target_compile_features(mkw_tvos_objc PRIVATE cxx_std_17)
++    target_compile_options(mkw_tvos_objc PRIVATE -fobjc-arc -O2 -w)
++    set_target_properties(mkw_tvos_objc PROPERTIES UNITY_BUILD OFF)
++
++    # Values shared by every product's Info.plist.
++    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
++        set(MKW_TVOS_PLIST_SUPPORTED_PLATFORM "AppleTVSimulator")
++        set(MKW_TVOS_PLIST_DT_PLATFORM "appletvsimulator")
++    else()
++        set(MKW_TVOS_PLIST_SUPPORTED_PLATFORM "AppleTVOS")
++        set(MKW_TVOS_PLIST_DT_PLATFORM "appletvos")
++    endif()
++    set(MKW_TVOS_PLIST_MINIMUM_OS "${CMAKE_OSX_DEPLOYMENT_TARGET}")
++    # CFBundleShortVersionString must be one to three dot-separated integers.
++    if(MKW_SETUP_VERSION MATCHES "^([0-9]+(\\.[0-9]+)?(\\.[0-9]+)?)")
++        set(MKW_TVOS_PLIST_SHORT_VERSION "${CMAKE_MATCH_1}")
++    else()
++        set(MKW_TVOS_PLIST_SHORT_VERSION "1.0")
++    endif()
++endif()
++
++# Turns a product into an Apple TV application bundle: Info.plist, the
++# Objective-C++ runtime object and the frameworks the runtime calls directly
++# (SDL3's static target already carries UIKit, GameController, Metal and the
++# rest). The bundle is flat on tvOS, so the resources mkw_configure_product
++# copies to $<TARGET_FILE_DIR> land in the bundle root beside the executable,
++# exactly where RuntimeConfigFile::ExecutableDirectory() looks for them.
++function(mkw_configure_tvos_bundle target display_name bundle_identifier)
++    set(MKW_TVOS_PLIST_EXECUTABLE "${target}")
++    set(MKW_TVOS_PLIST_DISPLAY_NAME "${display_name}")
++    set(MKW_TVOS_PLIST_IDENTIFIER "${bundle_identifier}")
++    set(_plist "${CMAKE_BINARY_DIR}/tvos/${target}-Info.plist")
++    configure_file("${MKW_RUNTIME_SOURCE_DIR}/resources/tvos/Info.plist.in" "${_plist}" @ONLY)
++    set_target_properties(${target} PROPERTIES
++        MACOSX_BUNDLE TRUE
++        MACOSX_BUNDLE_INFO_PLIST "${_plist}"
++        MACOSX_BUNDLE_GUI_IDENTIFIER "${bundle_identifier}"
++        MACOSX_BUNDLE_BUNDLE_NAME "${display_name}"
++        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${bundle_identifier}")
++    target_link_libraries(${target} PRIVATE mkw_tvos_objc "-framework AVFoundation" "-framework Foundation")
++endfunction()
++
+ function(mkw_apply_translated_compile_options target)
+     target_compile_options(${target} PRIVATE
+         -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -mllvm -hot-cold-split=true -w -pipe)
+@@ -308,6 +357,9 @@ endfunction()
+ add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}")
+ mkw_configure_product(WiiCompiled)
+ mkw_add_product_icon(WiiCompiled)
++if(MKW_PLATFORM_TVOS)
++    mkw_configure_tvos_bundle(WiiCompiled "WiiCompiled" "${MKW_TVOS_BUNDLE_IDENTIFIER}")
++endif()
+ target_sources(WiiCompiled PRIVATE $<TARGET_OBJECTS:mkw_base_registration>)
+ target_precompile_headers(WiiCompiled PRIVATE
+     "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
+@@ -319,6 +371,11 @@ if(MKW_HAVE_RETRO_REWIND)
+     add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}")
+     mkw_configure_product(RetroRewind)
+     mkw_add_product_icon(RetroRewind)
++    if(MKW_PLATFORM_TVOS)
++        # Builds, but the tvOS port only supports and documents the base game:
++        # see docs/building-tvos.md.
++        mkw_configure_tvos_bundle(RetroRewind "Retro Rewind" "${MKW_TVOS_BUNDLE_IDENTIFIER}.retrorewind")
++    endif()
+     target_precompile_headers(RetroRewind REUSE_FROM WiiCompiled)
+     target_sources(RetroRewind PRIVATE $<TARGET_OBJECTS:mkw_retro_registration>)
+     if(TARGET mkw_retro_sensitive)
+diff --git a/runtime/cmake/RuntimeLibrary.cmake b/runtime/cmake/RuntimeLibrary.cmake
+index 8d6160a..0d22e7c 100644
+--- a/runtime/cmake/RuntimeLibrary.cmake
++++ b/runtime/cmake/RuntimeLibrary.cmake
+@@ -17,6 +17,15 @@ endif()
+ # target-specific performance on the table.
+ if(MKW_HOST_IS_X86_64)
+     set(MKW_BASELINE_ARCH_FLAG -march=x86-64-${MKW_X86_CPU_PROFILE})
++elseif(MKW_PLATFORM_TVOS)
++    # tvOS is always cross-compiled on a Mac, so -mcpu=native would describe the
++    # build machine (an M-series CPU with ARMv8.4+ instructions the Apple TV
++    # cannot execute). Target the oldest Apple TV the build must run on instead:
++    # apple-a8 is the Apple TV HD (ARMv8.0); an Apple TV 4K-only build may use
++    # apple-a10 (1st gen), apple-a12 (2nd gen) or apple-a15 (3rd gen).
++    set(MKW_TVOS_CPU "apple-a8" CACHE STRING
++        "Oldest Apple TV CPU the tvOS build runs on (apple-a8 = Apple TV HD)")
++    set(MKW_BASELINE_ARCH_FLAG -mcpu=${MKW_TVOS_CPU})
+ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+     set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
+ else()
+diff --git a/runtime/include/guest_abi/flat_memory.h b/runtime/include/guest_abi/flat_memory.h
+index a2c6130..d1bf9fe 100644
+--- a/runtime/include/guest_abi/flat_memory.h
++++ b/runtime/include/guest_abi/flat_memory.h
+@@ -4,6 +4,22 @@
+ #include <cstddef>
+ #include <cstdint>
+ 
++// Relative so translated shards, tests and the runtime resolve it without
++// depending on which include roots their target happens to carry.
++#include "../platform/apple_target.h"
++
++// tvOS has no flat guest view. An Apple TV app cannot reserve a contiguous
++// 4 GiB range: arm64 Darwin maps a mandatory 4 GiB __PAGEZERO, and without the
++// extended-virtual-addressing entitlement a tvOS process on a 2 GiB Apple TV HD
++// gets only a few GiB of user address space in total, part of which is taken by
++// the dyld shared cache. Every guest access - including the translator's
++// check-free FlatWriteRam* stores - therefore takes the checked page-table path
++// (Memory::*), which needs only the per-region backing stores. See
++// src/platform/tvos/guest_flat_memory_tvos.cpp.
++#if MKW_HOST_TVOS
++#define MKW_GUEST_FLAT_VIEW_UNAVAILABLE 1
++#endif
++
+ namespace GuestFlat {
+ 
+ // Fixed base so the emitted access is `[reg + imm64-in-register]` with no load
+@@ -49,7 +65,11 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
+ #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
+ #endif
+ 
+-#if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
++#if defined(MKW_GUEST_FLAT_VIEW_UNAVAILABLE)
++// No flat view exists, so the answer is fixed at compile time and the flat
++// branches of every access helper fold away.
++inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
++#elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+ inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
+ #else
+ extern bool g_requiresCheckedAccess;
+diff --git a/runtime/include/guest_abi/memory_access.h b/runtime/include/guest_abi/memory_access.h
+index 289f928..159edec 100644
+--- a/runtime/include/guest_abi/memory_access.h
++++ b/runtime/include/guest_abi/memory_access.h
+@@ -539,15 +539,49 @@ MKW_MEMORY_FORCE_INLINE void WriteResolvedFloat64(uint8_t* r, uint32_t o, uint32
+ 
+ template <typename T>
+ MKW_MEMORY_FORCE_INLINE T FlatLoad(uint32_t address) {
++#if defined(MKW_GUEST_FLAT_VIEW_UNAVAILABLE)
++    // No flat guest view on this host (guest_abi/flat_memory.h): use the checked
++    // page-table path, which returns host byte order exactly like the swap below.
++    static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
++                  "FlatLoad supports 8/16/32/64-bit scalars");
++    if constexpr (sizeof(T) == 1) {
++        return static_cast<T>(Memory::Read8(address));
++    } else if constexpr (sizeof(T) == 2) {
++        return static_cast<T>(Memory::Read16(address));
++    } else if constexpr (sizeof(T) == 4) {
++        return static_cast<T>(Memory::Read32(address));
++    } else {
++        return static_cast<T>(Memory::Read64(address));
++    }
++#else
+     T value{};
+     std::memcpy(&value, MKW_FLAT_GUEST_BASE + address, sizeof(T));
+     return MaybeByteSwap(value);
++#endif
+ }
+ 
+ template <typename T>
+ MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
++#if defined(MKW_GUEST_FLAT_VIEW_UNAVAILABLE)
++    // Also reached by the translator's FlatWriteRam* stores. The checked path
++    // takes the bias-table fast path for ordinary RAM and additionally applies
++    // the executable-write and MMIO policy the flat view enforces with page
++    // protections on the hosts that have one.
++    static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
++                  "FlatStore supports 8/16/32/64-bit scalars");
++    if constexpr (sizeof(T) == 1) {
++        Memory::Write8(address, static_cast<uint8_t>(value));
++    } else if constexpr (sizeof(T) == 2) {
++        Memory::Write16(address, static_cast<uint16_t>(value));
++    } else if constexpr (sizeof(T) == 4) {
++        Memory::Write32(address, static_cast<uint32_t>(value));
++    } else {
++        Memory::Write64(address, static_cast<uint64_t>(value));
++    }
++#else
+     const T swapped = MaybeByteSwap(value);
+     std::memcpy(MKW_FLAT_GUEST_BASE + address, &swapped, sizeof(T));
++#endif
+ }
+ 
+ MKW_MEMORY_FORCE_INLINE uint8_t FlatRead8(uint32_t address) {
+diff --git a/runtime/include/platform/apple_target.h b/runtime/include/platform/apple_target.h
+new file mode 100644
+index 0000000..d764ea6
+--- /dev/null
++++ b/runtime/include/platform/apple_target.h
+@@ -0,0 +1,19 @@
++#pragma once
++
++// One spelling of "is this an Apple TV build" for code that must not depend on a
++// build-system definition (translated shards, tests and the runtime all include
++// guest_abi headers that branch on it).
++//
++// TargetConditionals.h defines every TARGET_OS_* macro, as 0 or 1, on all Apple
++// SDKs. TARGET_OS_TV is 1 for both the Apple TV device and the Apple TV
++// Simulator; TARGET_OS_IPHONE is also 1 there, so never use TARGET_OS_IPHONE
++// alone to mean "iPhone/iPad".
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
++#if defined(__APPLE__) && defined(TARGET_OS_TV) && TARGET_OS_TV
++#define MKW_HOST_TVOS 1
++#else
++#define MKW_HOST_TVOS 0
++#endif
+diff --git a/runtime/include/platform/tvos_app.h b/runtime/include/platform/tvos_app.h
+new file mode 100644
+index 0000000..b0e0e67
+--- /dev/null
++++ b/runtime/include/platform/tvos_app.h
+@@ -0,0 +1,15 @@
++#pragma once
++
++// Apple TV process entry. A tvOS app has to run inside UIApplicationMain, so
++// main() hands control to UIKit through SDL_RunApp and the runtime starts once
++// the application has finished launching - on the main thread, as SDL, UIKit
++// and the guest scheduler all require.
++namespace RuntimeTvos {
++
++using EntryPoint = int (*)(int argc, char** argv);
++
++// Never returns while the app is running; returns the entry point's exit code
++// if it ever finishes.
++int RunApplication(int argc, char** argv, EntryPoint entry);
++
++} // namespace RuntimeTvos
+diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
+index ea5a12b..1e10519 100644
+--- a/runtime/include/runtime_config.h
++++ b/runtime/include/runtime_config.h
+@@ -19,6 +19,7 @@
+ #include <utility>
+ #include <vector>
+ #include <toml.hpp>
++#include "platform/apple_target.h"
+ #include "platform/host_platform.h"
+ #ifdef _WIN32
+ #ifndef WIN32_LEAN_AND_MEAN
+@@ -1033,9 +1034,21 @@ inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
+     return ResolveRelativeTo(ResolveConfigPath().parent_path(), value);
+ }
+ 
++// The tvOS build copies the user's extracted DATA directory into the app bundle
++// (Launcher/tvos/build-tvos.command), because an Apple TV app has no other
++// place to read gigabytes of game files from and no way to edit Config.toml.
++inline constexpr const char* kTvosBundledDvdRootName = "DATA";
++
+ // The extracted DATA directory. Empty when nothing is configured.
+ inline std::filesystem::path ResolvedDvdRoot() {
+     const std::string configured = DvdRoot();
++#if MKW_HOST_TVOS
++    if (configured.empty()) {
++        if (const auto executableDirectory = ExecutableDirectory()) {
++            return (*executableDirectory / kTvosBundledDvdRootName).lexically_normal();
++        }
++    }
++#endif
+     return configured.empty() ? std::filesystem::path{} : ResolveRelativeToConfig(configured);
+ }
+ 
+diff --git a/runtime/resources/tvos/Info.plist.in b/runtime/resources/tvos/Info.plist.in
+new file mode 100644
+index 0000000..55092c1
+--- /dev/null
++++ b/runtime/resources/tvos/Info.plist.in
+@@ -0,0 +1,67 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<!--
++  tvOS application Info.plist template. cmake/PublicProducts.cmake fills in the
++  MKW_TVOS_PLIST_* placeholders per product with configure_file in at-only mode.
++-->
++<plist version="1.0">
++<dict>
++	<key>CFBundleDevelopmentRegion</key>
++	<string>en</string>
++	<key>CFBundleDisplayName</key>
++	<string>@MKW_TVOS_PLIST_DISPLAY_NAME@</string>
++	<key>CFBundleExecutable</key>
++	<string>@MKW_TVOS_PLIST_EXECUTABLE@</string>
++	<key>CFBundleIdentifier</key>
++	<string>@MKW_TVOS_PLIST_IDENTIFIER@</string>
++	<key>CFBundleInfoDictionaryVersion</key>
++	<string>6.0</string>
++	<key>CFBundleName</key>
++	<string>@MKW_TVOS_PLIST_DISPLAY_NAME@</string>
++	<key>CFBundlePackageType</key>
++	<string>APPL</string>
++	<key>CFBundleShortVersionString</key>
++	<string>@MKW_TVOS_PLIST_SHORT_VERSION@</string>
++	<key>CFBundleVersion</key>
++	<string>1</string>
++	<key>CFBundleSupportedPlatforms</key>
++	<array>
++		<string>@MKW_TVOS_PLIST_SUPPORTED_PLATFORM@</string>
++	</array>
++	<key>DTPlatformName</key>
++	<string>@MKW_TVOS_PLIST_DT_PLATFORM@</string>
++	<key>LSRequiresIPhoneOS</key>
++	<true/>
++	<key>MinimumOSVersion</key>
++	<string>@MKW_TVOS_PLIST_MINIMUM_OS@</string>
++	<key>UIDeviceFamily</key>
++	<array>
++		<integer>3</integer>
++	</array>
++	<key>UIRequiredDeviceCapabilities</key>
++	<array>
++		<string>arm64</string>
++	</array>
++	<!-- A full controller is required to play; the Siri Remote can drive the settings bar. -->
++	<key>GCSupportedGameControllers</key>
++	<array>
++		<dict>
++			<key>ProfileName</key>
++			<string>ExtendedGamepad</string>
++		</dict>
++		<dict>
++			<key>ProfileName</key>
++			<string>MicroGamepad</string>
++		</dict>
++	</array>
++	<key>GCSupportsControllerUserInteraction</key>
++	<true/>
++	<!--
++	  SDL's HIDAPI layer can reach CoreBluetooth on tvOS; without this string the
++	  system terminates an app that touches CoreBluetooth. WiiCompiled itself never
++	  starts Bluetooth on tvOS, so in practice the prompt is not expected to appear.
++	-->
++	<key>NSBluetoothAlwaysUsageDescription</key>
++	<string>Bluetooth is used only to talk to game controllers.</string>
++</dict>
++</plist>
+diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
+index 56bec9f..29f6f71 100644
+--- a/runtime/src/main.cpp
++++ b/runtime/src/main.cpp
+@@ -77,11 +77,25 @@
+ #include "runtime_log.h"
+ #include "runtime_product.h"
+ #include "recomp_mod_loader.h"
++#include "platform/apple_target.h"
++#if MKW_HOST_TVOS
++#include "platform/tvos_app.h"
++#endif
+ #include <aurora/aurora.h>
+ #include <aurora/gfx.h>
+ #include <dolphin/gx/GXAurora.h>
+ #include <dolphin/vi.h>
+ 
++// Apple TV builds have no Discord client to talk to and no general Bluetooth
++// HID access for Wii Remotes (tvOS only exposes GameController devices).
++#if MKW_HOST_TVOS
++inline constexpr bool kHostSupportsDiscordPresence = false;
++inline constexpr bool kHostSupportsWiiRemotes = false;
++#else
++inline constexpr bool kHostSupportsDiscordPresence = true;
++inline constexpr bool kHostSupportsWiiRemotes = true;
++#endif
++
+ // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
+ extern std::atomic_bool g_auroraFrameActive;
+ extern "C" int g_gxFrameCount;
+@@ -1375,7 +1389,7 @@ int RuntimeMain(int argc, char** argv) {
+             AudioBackend::Instance().SetSilenced(true);
+         }
+         RuntimeConfigFile::LogLoadedConfig();
+-        if (!g_headless && RuntimeConfigFile::DiscordPresenceEnabled()) {
++        if (!g_headless && kHostSupportsDiscordPresence && RuntimeConfigFile::DiscordPresenceEnabled()) {
+             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
+         }
+         SystemBridge::Initialize();
+@@ -1468,7 +1482,7 @@ int RuntimeMain(int argc, char** argv) {
+ 
+         // SDL reads its device hints when the joystick subsystem starts, which
+         // aurora_initialize does.
+-        Wiimote::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled());
++        Wiimote::ConfigureSdlHints(kHostSupportsWiiRemotes && RuntimeConfigFile::WiiRemotesEnabled());
+ 
+         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
+         if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
+@@ -1585,6 +1599,11 @@ int RuntimeMain(int argc, char** argv) {
+ }
+ 
+ int main(int argc, char** argv) {
++#if MKW_HOST_TVOS
++    // UIKit must own the process; the runtime starts once launching finishes.
++    return RuntimeTvos::RunApplication(argc, argv, &RuntimeMain);
++#else
+     return RuntimeMain(argc, argv);
++#endif
+ }
+ extern "C" bool g_dynamicAspectRatioEnabled = false;
+diff --git a/runtime/src/platform/host_platform.cpp b/runtime/src/platform/host_platform.cpp
+index 2a8c162..ecfc725 100644
+--- a/runtime/src/platform/host_platform.cpp
++++ b/runtime/src/platform/host_platform.cpp
+@@ -1,6 +1,8 @@
+ #include "platform/host_platform.h"
++#include "platform/apple_target.h"
+ 
+ #include <cstdlib>
++#include <string>
+ #include <vector>
+ 
+ #if defined(_WIN32)
+@@ -72,6 +74,22 @@ std::filesystem::path ApplicationDataDirectory(std::string_view applicationName)
+         CoTaskMemFree(rawPath);
+         return directory;
+     }
++#elif MKW_HOST_TVOS
++    // tvOS grants an app no persistent local storage beyond NSUserDefaults; the
++    // container's Library/Caches is the only writable directory that survives
++    // relaunches (the system may purge it when the Apple TV runs low on space).
++    // SDL_GetPrefPath makes the same choice on tvOS. HOME is the app container.
++    if (const char* home = std::getenv("HOME"); home && *home) {
++        return std::filesystem::path(home) / "Library" / "Caches" / applicationName;
++    }
++    // confstr reports the size it needs (terminator included) when given no buffer.
++    if (const size_t needed = confstr(_CS_DARWIN_USER_CACHE_DIR, nullptr, 0); needed > 1) {
++        std::string cacheDirectory(needed, '\0');
++        if (confstr(_CS_DARWIN_USER_CACHE_DIR, cacheDirectory.data(), cacheDirectory.size()) == needed) {
++            cacheDirectory.resize(needed - 1);
++            return std::filesystem::path(cacheDirectory) / applicationName;
++        }
++    }
+ #elif defined(__APPLE__)
+     if (const char* home = std::getenv("HOME"); home && *home) {
+         return std::filesystem::path(home) / "Library" / "Application Support" / applicationName;
+diff --git a/runtime/src/platform/tvos/external_audio_tvos.mm b/runtime/src/platform/tvos/external_audio_tvos.mm
+new file mode 100644
+index 0000000..2f85997
+--- /dev/null
++++ b/runtime/src/platform/tvos/external_audio_tvos.mm
+@@ -0,0 +1,32 @@
++// tvOS implementation of the external-audio probe behind music ducking
++// (music_attenuation.cpp polls it every 250 ms on its own thread).
++//
++// The macOS probe (src/external_audio_macos.cpp) enumerates Core Audio process
++// objects, an API that does not exist on tvOS. AVAudioSession answers the same
++// question directly: secondaryAudioShouldBeSilencedHint is true while another
++// app with a non-mixable session (Music, a video app playing over AirPlay...) is
++// playing, which is Apple's documented signal for a game to silence its
++// soundtrack. SDL opens the game's session with the mixable "ambient" category
++// (see platform/tvos/tvos_app.cpp), so that other audio keeps playing and the
++// hint becomes meaningful.
++
++#include "external_audio_macos.h"
++
++#import <AVFoundation/AVFoundation.h>
++
++namespace MusicAttenuation {
++
++MacOSAudioStatus QueryMacOSExternalAudio() noexcept {
++    @autoreleasepool {
++        AVAudioSession* session = [AVAudioSession sharedInstance];
++        if (session == nil) {
++            return {};
++        }
++        MacOSAudioStatus status;
++        status.available = true;
++        status.playing = session.secondaryAudioShouldBeSilencedHint ? true : false;
++        return status;
++    }
++}
++
++} // namespace MusicAttenuation
+diff --git a/runtime/src/platform/tvos/guest_flat_memory_tvos.cpp b/runtime/src/platform/tvos/guest_flat_memory_tvos.cpp
+new file mode 100644
+index 0000000..e50ed46
+--- /dev/null
++++ b/runtime/src/platform/tvos/guest_flat_memory_tvos.cpp
+@@ -0,0 +1,180 @@
++// tvOS backend for guest_flat_memory.h.
++//
++// The macOS backend (src/guest_flat_memory_macos.cpp) reserves a fixed 4 GiB
++// guest view and remaps every region's backing store into it. A tvOS process
++// cannot get that reservation (see guest_abi/flat_memory.h), so this backend
++// keeps only the part the checked Memory::* path needs: one anonymous backing
++// store per backing kind, with the cached/uncached/physical mirrors of MEM1 and
++// MEM2 resolving to the same host bytes. HostPointer() therefore answers
++// exactly what the macOS backend answers (it, too, hands out backing-store
++// pointers, never the remapped view), and the layout validation is the same,
++// so a layout that one backend rejects the other rejects too.
++//
++// RequiresCheckedAccess() is a compile-time true on tvOS, so nothing ever
++// dereferences MKW_FLAT_GUEST_BASE and there are no page protections to manage:
++// MMIO, deferred EFB reads and executable-write policy are all applied by the
++// checked path itself.
++
++#include "platform/apple_target.h"
++
++#if MKW_HOST_TVOS
++
++#include "guest_flat_memory.h"
++
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <algorithm>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++static_assert(GuestFlat::RequiresCheckedAccess(),
++              "the tvOS guest memory backend has no flat view; every access must be checked");
++
++namespace GuestFlat {
++namespace {
++
++struct TvosStore {
++    Backing kind = Backing::Owned;
++    uint32_t owned = 0;
++    uint64_t size = 0;
++    uint8_t* host = nullptr;
++};
++
++struct TvosMapping {
++    uint32_t base = 0;
++    uint64_t size = 0;
++    uint8_t* host = nullptr;
++};
++
++std::mutex g_tvosMutex;
++std::vector<TvosStore> g_tvosStores;
++std::vector<TvosMapping> g_tvosMappings;
++std::vector<RegionRequest> g_tvosLayout;
++bool g_tvosInitialized = false;
++
++inline uint64_t TvosRoundUp(uint64_t value, uint64_t align) {
++    return (value + align - 1) & ~(align - 1);
++}
++
++// Offset of a region inside its backing store; identical to the macOS backend.
++uint64_t TvosStoreOffset(const RegionRequest& r) {
++    if (r.backing == Backing::Mem1) return r.base & 0x1fffffffu;
++    if (r.backing == Backing::Mem2) return (r.base & 0x1fffffffu) - 0x10000000u;
++    return 0;
++}
++
++bool TvosSameLayout(const std::vector<RegionRequest>& a, const std::vector<RegionRequest>& b) {
++    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
++        [](const auto& x, const auto& y) { return x.base == y.base && x.size == y.size && x.backing == y.backing; });
++}
++
++} // namespace
++
++// The flat path is never usable on tvOS.
++bool IsActive() { return false; }
++
++void Initialize(const std::vector<RegionRequest>& regions) {
++    std::lock_guard lock(g_tvosMutex);
++    const uint64_t pageSize = static_cast<uint64_t>(getpagesize());
++    if (g_tvosInitialized) {
++        if (!TvosSameLayout(g_tvosLayout, regions))
++            throw std::runtime_error("flat guest layout cannot be remapped");
++        return;
++    }
++
++    for (size_t i = 0; i < regions.size(); ++i) {
++        const auto& r = regions[i];
++        if (r.size == 0) continue;
++        if (r.size > kGuestSpaceSize - r.base ||
++            r.base % pageSize != 0 || TvosStoreOffset(r) % pageSize != 0) {
++            throw std::runtime_error("invalid flat guest memory region");
++        }
++        const uint64_t end = static_cast<uint64_t>(r.base) + TvosRoundUp(r.size, pageSize);
++        for (size_t j = 0; j < i; ++j) {
++            const auto& prior = regions[j];
++            if (prior.size == 0) continue;
++            const uint64_t priorEnd = static_cast<uint64_t>(prior.base) + TvosRoundUp(prior.size, pageSize);
++            if (r.base < priorEnd && prior.base < end) {
++                throw std::runtime_error("overlapping flat guest memory regions");
++            }
++        }
++    }
++
++    std::vector<TvosStore> stores;
++    std::vector<TvosMapping> mappings;
++    try {
++        for (const auto& r : regions) {
++            if (!r.size) continue;
++            const uint32_t owned = r.backing == Backing::Owned ? r.base : 0;
++            auto it = std::find_if(stores.begin(), stores.end(), [&](const TvosStore& s) {
++                return s.kind == r.backing && s.owned == owned;
++            });
++            const uint64_t need = TvosRoundUp(TvosStoreOffset(r) + r.size, pageSize);
++            if (it == stores.end()) {
++                stores.push_back({r.backing, owned, need, nullptr});
++            } else {
++                it->size = std::max(it->size, need);
++            }
++        }
++
++        // Anonymous memory is zero-filled and only counts against the app's
++        // memory footprint once touched, so sizing a store for its largest
++        // mirror costs nothing up front.
++        for (auto& s : stores) {
++            void* host = mmap(nullptr, static_cast<size_t>(s.size), PROT_READ | PROT_WRITE,
++                              MAP_PRIVATE | MAP_ANON, -1, 0);
++            if (host == MAP_FAILED) {
++                throw std::runtime_error("unable to allocate anonymous tvOS guest backing store of " +
++                                         std::to_string(s.size) + " bytes");
++            }
++            s.host = static_cast<uint8_t*>(host);
++        }
++
++        for (const auto& r : regions) {
++            if (!r.size) continue;
++            const uint32_t owned = r.backing == Backing::Owned ? r.base : 0;
++            const auto& s = *std::find_if(stores.begin(), stores.end(), [&](const TvosStore& x) {
++                return x.kind == r.backing && x.owned == owned;
++            });
++            mappings.push_back({r.base, r.size, s.host + TvosStoreOffset(r)});
++        }
++    } catch (...) {
++        for (auto& s : stores) {
++            if (s.host != nullptr) {
++                munmap(s.host, static_cast<size_t>(s.size));
++            }
++        }
++        throw;
++    }
++
++    g_tvosLayout = regions;
++    g_tvosStores = std::move(stores);
++    g_tvosMappings = std::move(mappings);
++    g_tvosInitialized = true;
++}
++
++uint8_t* HostPointer(uint32_t a) {
++    for (const auto& m : g_tvosMappings) {
++        if (a >= m.base && uint64_t(a - m.base) < m.size) {
++            return m.host + (a - m.base);
++        }
++    }
++    return nullptr;
++}
++
++// Without a flat view there is nothing to protect; the checked path consults the
++// deferred-read and executable-range tables directly.
++void ProtectDeferredRange(uint32_t, size_t) {}
++void UnprotectDeferredRange(uint32_t, size_t) {}
++void RegisterExecutableRange(uint32_t, uint32_t) {}
++FaultCounters Counters() { return {}; }
++void LogFaultSummary() noexcept {}
++// No guest-space fault can occur, so every access violation is a genuine crash.
++bool HandleAccessViolation(void*, bool) noexcept { return false; }
++
++} // namespace GuestFlat
++
++#endif // MKW_HOST_TVOS
+diff --git a/runtime/src/platform/tvos/steam_input_layout_tvos.cpp b/runtime/src/platform/tvos/steam_input_layout_tvos.cpp
+new file mode 100644
+index 0000000..bbfb1a2
+--- /dev/null
++++ b/runtime/src/platform/tvos/steam_input_layout_tvos.cpp
+@@ -0,0 +1,29 @@
++// tvOS replacement for src/steam_input_layout.cpp.
++//
++// The desktop implementation asks a running Steam client to swap controller
++// layouts by launching a steam:// URL through posix_spawn, which tvOS prohibits
++// (and there is no Steam client on Apple TV). The interface stays callable so
++// main.cpp and aurora_events.h need no platform branches.
++
++#include "platform/apple_target.h"
++
++#if MKW_HOST_TVOS
++
++#include "steam_input_layout.h"
++
++namespace SteamInputLayout {
++
++void Initialize(bool enabled, uint32_t appId) {
++    static_cast<void>(enabled);
++    static_cast<void>(appId);
++}
++
++void HandleEvents(const AuroraEvent* events) {
++    static_cast<void>(events);
++}
++
++void Release() noexcept {}
++
++} // namespace SteamInputLayout
++
++#endif // MKW_HOST_TVOS
+diff --git a/runtime/src/platform/tvos/tvos_app.cpp b/runtime/src/platform/tvos/tvos_app.cpp
+new file mode 100644
+index 0000000..cdde73b
+--- /dev/null
++++ b/runtime/src/platform/tvos/tvos_app.cpp
+@@ -0,0 +1,142 @@
++// Apple TV process entry: UIKit start-up through SDL plus a full-size stack for
++// the game.
++//
++// Why the dedicated stack: the guest's main thread runs on the host main
++// thread's own stack (fiber_manager.cpp registers the scheduler fiber as the
++// guest main thread; only guest threads created later get their own 1 MiB
++// coroutine stacks). macOS and Linux give the main thread 8 MiB. tvOS gives it
++// 1 MiB, part of which UIKit and SDL have already used by the time the runtime
++// starts, and the main-thread stack size cannot be raised on tvOS. So the
++// runtime is started on an 8 MiB stack switched to with the same Darwin AArch64
++// context primitive host_context.cpp uses for every guest fiber
++// (platform/macos/co_switch.S). It is still the main thread: SDL event pumping,
++// UIKit and Metal presentation behave exactly as before; only the stack memory
++// differs, as it already does whenever a guest fiber drives a frame.
++
++#include "platform/apple_target.h"
++
++#if MKW_HOST_TVOS
++
++#include "platform/tvos_app.h"
++
++#include <SDL3/SDL_hints.h>
++// main() lives in main.cpp; SDL_main.h must only declare SDL_RunApp here, not
++// inject SDL's own main() (the runtime targets also define this globally).
++#ifndef SDL_MAIN_HANDLED
++#define SDL_MAIN_HANDLED
++#endif
++#include <SDL3/SDL_main.h>
++
++#include <sys/mman.h>
++#include <unistd.h>
++
++#include <cstddef>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++extern "C" void mkw_co_switch(void** targetSp, void** sourceSp);
++extern "C" void* mkw_co_init(void* stackTop, void (*entry)(void*), void* argument);
++
++namespace RuntimeTvos {
++namespace {
++
++// Matches the default macOS/Linux main-thread stack the runtime is tested with.
++constexpr std::size_t kGameStackSize = 8u * 1024u * 1024u;
++
++struct LaunchState {
++    EntryPoint entry = nullptr;
++    int argc = 0;
++    char** argv = nullptr;
++    int result = EXIT_FAILURE;
++    void* hostStackPointer = nullptr;
++    void* gameStackPointer = nullptr;
++};
++
++LaunchState g_launch;
++std::vector<char*> g_runtimeArguments;
++
++// RuntimeMain rejects unknown options on purpose, but UIKit and Xcode may append
++// Cocoa user-defaults arguments ("-Key value") to an app launch. The runtime's
++// own options are all spelled "--...", so only those are forwarded.
++void SelectRuntimeArguments(int argc, char* argv[]) {
++    g_runtimeArguments.clear();
++    if (argc > 0 && argv != nullptr && argv[0] != nullptr) {
++        g_runtimeArguments.push_back(argv[0]);
++    }
++    for (int i = 1; i < argc && argv != nullptr; ++i) {
++        if (argv[i] != nullptr && std::strncmp(argv[i], "--", 2) == 0) {
++            g_runtimeArguments.push_back(argv[i]);
++        } else if (argv[i] != nullptr) {
++            std::fprintf(stderr, "[tvos] ignoring launch argument '%s'\n", argv[i]);
++        }
++    }
++    g_launch.argc = static_cast<int>(g_runtimeArguments.size());
++    g_runtimeArguments.push_back(nullptr);
++    g_launch.argv = g_runtimeArguments.data();
++}
++
++void GameStackMain(void* argument) {
++    auto* launch = static_cast<LaunchState*>(argument);
++    launch->result = launch->entry(launch->argc, launch->argv);
++    // Back to the UIKit stack. Nothing ever switches to this frame again, and
++    // the coroutine trampoline that called us has no caller to return to.
++    mkw_co_switch(&launch->hostStackPointer, &launch->gameStackPointer);
++    std::abort();
++}
++
++int SDLCALL RunOnGameStack(int argc, char* argv[]) {
++    SelectRuntimeArguments(argc, argv);
++
++    const std::size_t guardSize = static_cast<std::size_t>(getpagesize());
++    const std::size_t totalSize = kGameStackSize + guardSize;
++    void* stack = mmap(nullptr, totalSize, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
++    if (stack == MAP_FAILED) {
++        std::fprintf(stderr, "[tvos] could not allocate the %zu-byte game stack; "
++                             "starting on the 1 MiB main-thread stack instead\n",
++                     kGameStackSize);
++        return g_launch.entry(g_launch.argc, g_launch.argv);
++    }
++    // Lowest page faults on overflow instead of corrupting the mapping below it.
++    if (mprotect(stack, guardSize, PROT_NONE) != 0) {
++        munmap(stack, totalSize);
++        std::fprintf(stderr, "[tvos] could not guard the game stack; "
++                             "starting on the 1 MiB main-thread stack instead\n");
++        return g_launch.entry(g_launch.argc, g_launch.argv);
++    }
++
++    g_launch.gameStackPointer =
++        mkw_co_init(static_cast<char*>(stack) + totalSize, &GameStackMain, &g_launch);
++    mkw_co_switch(&g_launch.gameStackPointer, &g_launch.hostStackPointer);
++
++    munmap(stack, totalSize);
++    return g_launch.result;
++}
++
++} // namespace
++
++int RunApplication(int argc, char** argv, EntryPoint entry) {
++    g_launch.entry = entry;
++
++    // Hints read when SDL brings up its subsystems inside aurora_initialize.
++    //
++    // The Siri Remote must not occupy a controller slot: as a joystick it would
++    // be enumerated first and take GameCube port 1 from the player's real
++    // controller. Without it SDL delivers the remote's presses as keys instead
++    // (arrows, Select = Return, Menu = Escape, Play/Pause = Pause), which the
++    // keyboard bindings and the settings bar already understand.
++    SDL_SetHint(SDL_HINT_TV_REMOTE_AS_JOYSTICK, "0");
++    // Controller buttons must reach the game, never UIKit navigation (which
++    // would send the app to the background on B / Menu).
++    SDL_SetHint(SDL_HINT_APPLE_TV_CONTROLLER_UI_EVENTS, "0");
++    // A mixable session so music started in another app keeps playing; music
++    // ducking (external_audio_tvos.mm) then silences the game's soundtrack.
++    SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "ambient");
++
++    return SDL_RunApp(argc, argv, &RunOnGameStack, nullptr);
++}
++
++} // namespace RuntimeTvos
++
++#endif // MKW_HOST_TVOS
+diff --git a/runtime/src/settings_overlay.cpp b/runtime/src/settings_overlay.cpp
+index 6c2083a..cf1ec4b 100644
+--- a/runtime/src/settings_overlay.cpp
++++ b/runtime/src/settings_overlay.cpp
+@@ -11,6 +11,7 @@
+ #include "runtime_config.h"
+ #include "runtime_log.h"
+ #include "wiimote_host.h"
++#include "platform/apple_target.h"
+ 
+ #include <imgui.h>
+ #include <SDL3/SDL_events.h>
+@@ -56,6 +57,20 @@ namespace AxDspHle {
+ void SetMixWorkerEnabled(bool enabled);
+ }
+ 
++// How the settings bar is opened and closed. An Apple TV has neither F10 nor a
++// mouse: the bar toggles with the controller button in the "Select" position -
++// SDL's BACK: View on Xbox, Share/Create on PlayStation, Options on MFi pads
++// (a PlayStation pad's own "Options" button is SDL's START and stays the game's
++// Start) - or the Siri Remote's Play/Pause button. Its menus are driven by ImGui
++// keyboard/gamepad navigation while it owns input.
++#if MKW_HOST_TVOS
++#define MKW_SETTINGS_TOGGLE_HINT "View / Share / Create (or Play/Pause on the Siri Remote)"
++#define MKW_SETTINGS_TOGGLE_SHORT "View"
++#else
++#define MKW_SETTINGS_TOGGLE_HINT "F10"
++#define MKW_SETTINGS_TOGGLE_SHORT "F10"
++#endif
++
+ namespace settings_overlay {
+ namespace {
+ 
+@@ -75,6 +90,9 @@ const char* GraphicsApiDisplayName() {
+ }
+ 
+ bool g_topBarVisible = false;
++#if MKW_HOST_TVOS
++bool g_focusTopBarPending = false;
++#endif
+ bool g_exitPromptOpen = false;
+ bool g_restartPromptOpen = false;
+ bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
+@@ -249,6 +267,9 @@ void SetTopBarVisible(bool visible) {
+         return;
+     }
+     g_topBarVisible = visible;
++#if MKW_HOST_TVOS
++    g_focusTopBarPending = visible;
++#endif
+ }
+ 
+ void ApplyConfiguredMappings() {
+@@ -328,6 +349,17 @@ void DrawWiiRemoteSetup() {
+     if (!ImGui::CollapsingHeader("Wii Remote setup (Bluetooth)")) {
+         return;
+     }
++#if MKW_HOST_TVOS
++    // main.cpp never starts the Wii Remote host on tvOS: apps there can only
++    // reach controllers through the GameController framework.
++    ImGui::Indent();
++    PushMenuTextWrap();
++    ImGui::TextDisabled("Wii Remotes are not available on Apple TV: tvOS gives apps no access to "
++                        "Bluetooth HID devices. Use an MFi, Xbox or PlayStation controller.");
++    ImGui::PopTextWrapPos();
++    ImGui::Unindent();
++    return;
++#endif
+     ImGui::Indent();
+     PushMenuTextWrap();
+     const std::string notice = Wiimote::PlatformNotice();
+@@ -1120,7 +1152,13 @@ void DrawAudioSettings() {
+         MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
+         RuntimeConfigFile::SetAttenuateMusicWhenMediaPlays(g_attenuateMusicWhenMediaPlays);
+     }
+-#if defined(__APPLE__)
++#if MKW_HOST_TVOS
++    if (ImGui::IsItemHovered()) {
++        ImGui::SetTooltip(
++            "Mutes the game's music while another app, such as Music, is playing audio "
++            "in the background.");
++    }
++#elif defined(__APPLE__)
+     if (ImGui::IsItemHovered()) {
+         ImGui::SetTooltip(
+             "Detects other apps with active audio output on macOS 14.2 or later. "
+@@ -1133,7 +1171,9 @@ void DrawAudioSettings() {
+         } else if (!MusicAttenuation::IsMediaControlInitializationComplete()) {
+             ImGui::TextDisabled("Checking external audio...");
+         } else if (!MusicAttenuation::IsMediaControlAvailable()) {
+-#if defined(__APPLE__)
++#if MKW_HOST_TVOS
++            ImGui::TextDisabled("External audio detection is unavailable.");
++#elif defined(__APPLE__)
+             ImGui::TextDisabled("External audio detection unavailable (requires macOS 14.2 or later).");
+ #else
+             ImGui::TextDisabled("Media controls are unavailable.");
+@@ -1238,7 +1278,9 @@ void DrawGraphicsSettings() {
+     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+     ImGui::TextDisabled("Frame interpolation is experimental, you might find visual artifacts");
+     ImGui::PopTextWrapPos();
+-#if defined(__APPLE__)
++    // tvOS builds aurora's MetalFX stub (no Apple TV GPU this port targets has
++    // MetalFX), so the control would only ever read "unsupported" there.
++#if defined(__APPLE__) && !MKW_HOST_TVOS
+     const bool metalFxSupported = aurora_is_metalfx_spatial_supported();
+     ImGui::BeginDisabled(!metalFxSupported);
+     if (ImGui::Checkbox("MetalFX spatial upscaling", &g_metalFxSpatialUpscaling)) {
+@@ -1407,7 +1449,7 @@ void DrawStartupScreen() {
+             ImGui::TextUnformatted(line);
+             nextY = ImGui::GetCursorPosY() + 4.0f;
+         }
+-        constexpr const char* kHint = "Press F10 to open settings";
++        constexpr const char* kHint = "Press " MKW_SETTINGS_TOGGLE_HINT " to open settings";
+         ImGui::SetWindowFontScale(0.8f);
+         const ImVec2 hintSize = ImGui::CalcTextSize(kHint);
+         ImGui::SetCursorPos(ImVec2(std::max(0.0f, (viewport->Size.x - hintSize.x) * 0.5f), nextY));
+@@ -1477,12 +1519,21 @@ void DrawTopBar() {
+                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
+                      ImGuiWindowFlags_NoFocusOnAppearing)) {
+         for (const char* line : {"Settings open - game controls disabled.",
+-                                 "Press F10 to return to the game."}) {
++                                 "Press " MKW_SETTINGS_TOGGLE_HINT " to return to the game."}) {
+             ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize(line).x) * 0.5f);
+             ImGui::TextUnformatted(line);
+         }
+     }
+     ImGui::End();
++#if MKW_HOST_TVOS
++    // Without a mouse, navigation needs a focused window to start from: give the
++    // menu bar focus once each time the bar opens (it applies to the window
++    // BeginMainMenuBar creates next).
++    if (g_focusTopBarPending) {
++        ImGui::SetNextWindowFocus();
++        g_focusTopBarPending = false;
++    }
++#endif
+     if (!ImGui::BeginMainMenuBar()) return;
+ 
+     ImGui::TextUnformatted("WiiCompiled");
+@@ -1534,11 +1585,11 @@ void DrawTopBar() {
+     }
+ 
+     const ImGuiStyle& style = ImGui::GetStyle();
+-    const float hideWidth = ImGui::CalcTextSize("Hide (F10)").x + style.FramePadding.x * 2.0f;
++    const float hideWidth = ImGui::CalcTextSize("Hide (" MKW_SETTINGS_TOGGLE_SHORT ")").x + style.FramePadding.x * 2.0f;
+     const float exitWidth = ImGui::CalcTextSize("X").x + style.FramePadding.x * 2.0f;
+     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
+                                   ImGui::GetWindowWidth() - hideWidth - exitWidth - style.ItemSpacing.x - 8.0f));
+-    if (ImGui::MenuItem("Hide (F10)")) {
++    if (ImGui::MenuItem("Hide (" MKW_SETTINGS_TOGGLE_SHORT ")")) {
+         SetTopBarVisible(false);
+     }
+     if (ImGui::MenuItem("X")) {
+@@ -1563,6 +1614,37 @@ bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
+     return event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode == code;
+ }
+ 
++#if MKW_HOST_TVOS
++bool IsGamepadButtonPress(const SDL_Event& event, SDL_GamepadButton button) {
++    return event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
++           event.gbutton.button == static_cast<Uint8>(button);
++}
++
++// The Apple TV has no mouse, so the settings bar and its prompts are navigated
++// with the controller (D-pad, A to select, B to go back) or the Siri Remote
++// (arrows, Select, Menu). Navigation is only switched on while those menus own
++// input - the game's input is blocked then anyway - so ImGui can never capture
++// controller or remote input during play. It stays off while a binding is being
++// recorded, where the pressed button must reach the rebind logic and not
++// activate the focused widget.
++void UpdateTvosMenuNavigation() {
++    if (ImGui::GetCurrentContext() == nullptr) {
++        return;
++    }
++    const bool recording = g_rebind.active || controller_mapping_wizard::IsActive();
++    const bool menusOwnInput =
++        !recording && (g_topBarVisible || g_exitPromptOpen || g_restartPromptOpen);
++    constexpr ImGuiConfigFlags kNavigation =
++        ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
++    ImGuiIO& io = ImGui::GetIO();
++    if (menusOwnInput) {
++        io.ConfigFlags |= kNavigation;
++    } else {
++        io.ConfigFlags &= ~kNavigation;
++    }
++}
++#endif
++
+ bool IsMouseActivity(const SDL_Event& event) {
+     switch (event.type) {
+     case SDL_EVENT_MOUSE_MOTION:
+@@ -1611,6 +1693,9 @@ void ApplyInputBlockState() {
+                          g_exitPromptOpen || g_restartPromptOpen || g_topBarVisible || StartupScreenVisible();
+     PADBlockInput(blocked);
+     InputBindings::SetInputBlocked(blocked);
++#if MKW_HOST_TVOS
++    UpdateTvosMenuNavigation();
++#endif
+ }
+ } // namespace
+ 
+@@ -1663,7 +1748,16 @@ void HandleEvents(const AuroraEvent* events) noexcept {
+             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
+                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
+         }
+-        if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
++        bool settingsToggle = IsToggleKey(ev->sdl, SDL_SCANCODE_F10);
++#if MKW_HOST_TVOS
++        // Siri Remote Play/Pause arrives as the Pause key; the controller's
++        // Select-position button (View/Share/Create) is SDL's BACK, unbound by
++        // default in the GameCube mapping.
++        settingsToggle = settingsToggle || IsToggleKey(ev->sdl, SDL_SCANCODE_PAUSE) ||
++                         (!controller_mapping_wizard::IsActive() &&
++                          IsGamepadButtonPress(ev->sdl, SDL_GAMEPAD_BUTTON_BACK));
++#endif
++        if (!g_rebind.active && settingsToggle) {
+             SetTopBarVisible(!g_topBarVisible);
+             ApplyInputBlockState();
+         }

@@ -180,6 +180,9 @@ translation, generating the manifest and build graph, and compiling, see [`trans
 
 For a step-by-step guide on compiling both WiiCompiled and Retro Rewind from source on macOS (Apple Silicon), see the [macOS Build Guide](docs/building-macos.md).
 
+To build the base game for **Apple TV** (Apple TV HD and later, built on a Mac with Xcode), see the
+[tvOS Build Guide](docs/building-tvos.md). The tvOS port is untested on hardware so far.
+
 ## FAQ
 
 **Is this an emulator?**

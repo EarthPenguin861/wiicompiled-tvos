@@ -5,8 +5,15 @@ cmake_minimum_required(VERSION 3.25)
 # accidentally inherit the running SDK's deployment version. This cache entry
 # is harmless on non-Apple platforms and remains overridable by a caller.
 if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
-        "Minimum macOS version supported by WiiCompiled" FORCE)
+    if(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+        # tvOS 15 is the release contemporary with macOS 12, so the libc++
+        # availability floor the runtime is written against is the same.
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING
+            "Minimum tvOS version supported by WiiCompiled" FORCE)
+    else()
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING
+            "Minimum macOS version supported by WiiCompiled" FORCE)
+    endif()
 endif()
 project(mkw_recompiled)
 
@@ -28,6 +35,16 @@ endif()
 
 if(WIN32 AND MINGW AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
     set(MKW_PLATFORM_WINDOWS TRUE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+    # Apple TV (device, or the arm64 Apple TV Simulator on Apple Silicon). Must
+    # precede the macOS branch: APPLE is true for every Darwin target.
+    # See docs/building-tvos.md and Launcher/tvos/build-tvos.command.
+    if(NOT CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+        message(FATAL_ERROR
+            "WiiCompiled for tvOS supports arm64 only; configure with -DCMAKE_OSX_ARCHITECTURES=arm64 "
+            "(got '${CMAKE_OSX_ARCHITECTURES}')")
+    endif()
+    set(MKW_PLATFORM_TVOS TRUE)
 elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|arm64|ARM64)$")
     set(MKW_PLATFORM_MACOS TRUE)
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
@@ -39,7 +56,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(
     set(MKW_PLATFORM_LINUX TRUE)
 else()
     message(FATAL_ERROR
-        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS x86_64/arm64")
+        "WiiCompiled supports 64-bit LLVM-MinGW Clang on Windows, native Linux x86_64/aarch64, or Apple Clang on macOS x86_64/arm64 and tvOS arm64")
+endif()
+
+if(MKW_PLATFORM_TVOS)
+    # external_audio_tvos.mm talks to AVAudioSession.
+    enable_language(OBJCXX)
+    # Neither Dawn nor SDL3 publishes a tvOS package, and a host (macOS) build
+    # must never be picked up by find_package, so both are built from aurora's
+    # pinned sources. Plain cache defaults: an explicit -D still wins.
+    set(AURORA_DAWN_PROVIDER "vendor" CACHE STRING
+        "How to provide Dawn: auto, vendor (build from source), system (find_package/imported), package (download prebuilt)")
+    set(AURORA_SDL3_PROVIDER "vendor" CACHE STRING
+        "How to provide SDL3: auto, vendor (build from source), system (find_package/imported), or package (download prebuilt)")
+    set(MKW_TVOS_BUNDLE_IDENTIFIER "local.wiicompiled.tvos" CACHE STRING
+        "CFBundleIdentifier of the tvOS app; must match the provisioning profile used to sign it")
 endif()
 
 if(MKW_PLATFORM_WINDOWS)
@@ -236,7 +267,7 @@ else()
         set(DAWN_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
         set(DAWN_ENABLE_METAL OFF CACHE BOOL "" FORCE)
         set(TINT_BUILD_HLSL_WRITER ON CACHE BOOL "" FORCE)
-    elseif(MKW_PLATFORM_MACOS)
+    elseif(MKW_PLATFORM_MACOS OR MKW_PLATFORM_TVOS)
         set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
         set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
         set(DAWN_ENABLE_METAL ON CACHE BOOL "" FORCE)
@@ -344,7 +375,25 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
-if(MKW_PLATFORM_MACOS)
+if(MKW_PLATFORM_TVOS)
+    # src/platform/tvos/ replaces the host services tvOS cannot provide: the
+    # 4 GiB flat guest view (guest_flat_memory_tvos.cpp), Core Audio process
+    # objects (external_audio_tvos.mm, built in cmake/PublicProducts.cmake) and
+    # posix_spawn (steam_input_layout_tvos.cpp). Guest fibers use the same
+    # x18-safe Darwin AArch64 context switch as Apple Silicon macOS.
+    list(REMOVE_ITEM SOURCES
+        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/external_audio_macos.cpp"
+        "${CMAKE_CURRENT_LIST_DIR}/src/steam_input_layout.cpp")
+    file(GLOB MKW_TVOS_PLATFORM_SOURCES CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_LIST_DIR}/src/platform/tvos/*.cpp")
+    # Self-contained translation units; keep them out of the runtime's unity
+    # batches so their file-local names can never collide with a neighbour's.
+    set_source_files_properties(${MKW_TVOS_PLATFORM_SOURCES} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+    enable_language(ASM)
+    list(APPEND SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/platform/macos/co_switch.S")
+elseif(MKW_PLATFORM_MACOS)
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
     if(MKW_PLATFORM_MACOS_ARM64)
         # HostContext's Apple Silicon backend is implemented in a small assembly
@@ -357,6 +406,10 @@ if(MKW_PLATFORM_MACOS)
 else()
     list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
 endif()
+if(NOT MKW_PLATFORM_TVOS)
+    # Apple TV host services (each file also compiles to nothing off tvOS).
+    list(FILTER SOURCES EXCLUDE REGEX "/src/platform/tvos/")
+endif()
 set(MKW_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/platform/host_platform.cpp")
 set(MKW_BASE_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp")
 set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro_rewind_product.cpp")
@@ -367,7 +420,11 @@ set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp
 list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_SOURCE}
      ${MKW_CPU_BASELINE_SOURCE} ${MKW_PLATFORM_SOURCE})
 
-include("${CMAKE_CURRENT_LIST_DIR}/cmake/PlatformTests.cmake")
+# The host-contract tests run on the build machine. A tvOS build is a cross
+# build whose binaries only run on an Apple TV, so it has none to offer.
+if(NOT MKW_PLATFORM_TVOS)
+    include("${CMAKE_CURRENT_LIST_DIR}/cmake/PlatformTests.cmake")
+endif()
 
 set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/RuntimeLibrary.cmake")

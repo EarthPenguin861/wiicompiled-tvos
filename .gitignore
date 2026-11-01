@@ -28,6 +28,8 @@ Code.pul
 /build-*/
 /native-build/
 /native-build-macos/
+/native-build-tvos/
+/native-build-tvos-simulator/
 /local-products/
 /dist/
 /out/

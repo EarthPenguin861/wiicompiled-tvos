@@ -4,6 +4,22 @@
 #include <cstddef>
 #include <cstdint>
 
+// Relative so translated shards, tests and the runtime resolve it without
+// depending on which include roots their target happens to carry.
+#include "../platform/apple_target.h"
+
+// tvOS has no flat guest view. An Apple TV app cannot reserve a contiguous
+// 4 GiB range: arm64 Darwin maps a mandatory 4 GiB __PAGEZERO, and without the
+// extended-virtual-addressing entitlement a tvOS process on a 2 GiB Apple TV HD
+// gets only a few GiB of user address space in total, part of which is taken by
+// the dyld shared cache. Every guest access - including the translator's
+// check-free FlatWriteRam* stores - therefore takes the checked page-table path
+// (Memory::*), which needs only the per-region backing stores. See
+// src/platform/tvos/guest_flat_memory_tvos.cpp.
+#if MKW_HOST_TVOS
+#define MKW_GUEST_FLAT_VIEW_UNAVAILABLE 1
+#endif
+
 namespace GuestFlat {
 
 // Fixed base so the emitted access is `[reg + imm64-in-register]` with no load
@@ -49,7 +65,11 @@ inline constexpr uintptr_t kFixedFlatGuestBase = 0x0000'0010'0000'0000ull;
 #define MKW_GUEST_FLAT_FIXED_PAGE_SIZE 1
 #endif
 
-#if defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
+#if defined(MKW_GUEST_FLAT_VIEW_UNAVAILABLE)
+// No flat view exists, so the answer is fixed at compile time and the flat
+// branches of every access helper fold away.
+inline constexpr bool RequiresCheckedAccess() noexcept { return true; }
+#elif defined(MKW_GUEST_FLAT_FIXED_PAGE_SIZE)
 inline constexpr bool RequiresCheckedAccess() noexcept { return false; }
 #else
 extern bool g_requiresCheckedAccess;

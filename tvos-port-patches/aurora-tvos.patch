@@ -1,0 +1,166 @@
+diff --git a/cmake/AuroraDawnProvider.cmake b/cmake/AuroraDawnProvider.cmake
+index 3a57584..69fc435 100644
+--- a/cmake/AuroraDawnProvider.cmake
++++ b/cmake/AuroraDawnProvider.cmake
+@@ -145,9 +145,24 @@ if (_aurora_dawn_provider STREQUAL "vendor")
+     endif ()
+ 
+     include(FetchContent)
++    # tvOS: Dawn assumes every Apple TV GPU is Apple3+; make it query the GPU
++    # family so the A8 (Apple2) in the Apple TV HD gets the right toggles.
++    # PATCH_COMMAND does not run for a tree handed in through
++    # FETCHCONTENT_SOURCE_DIR_DAWN, so such a tree is patched here directly.
++    set(_aurora_dawn_patch_args "")
++    if (CMAKE_SYSTEM_NAME STREQUAL "tvOS")
++      set(_aurora_dawn_tvos_patches "${CMAKE_CURRENT_LIST_DIR}/patches/apply-dawn-tvos-gpu-family.cmake")
++      include("${_aurora_dawn_tvos_patches}")
++      if (DEFINED FETCHCONTENT_SOURCE_DIR_DAWN AND EXISTS "${FETCHCONTENT_SOURCE_DIR_DAWN}")
++        aurora_dawn_apply_tvos_patches("${FETCHCONTENT_SOURCE_DIR_DAWN}")
++      endif ()
++      set(_aurora_dawn_patch_args
++        PATCH_COMMAND ${CMAKE_COMMAND} -DDAWN_SOURCE_DIR=<SOURCE_DIR> -P "${_aurora_dawn_tvos_patches}")
++    endif ()
+     FetchContent_Declare(dawn
+       URL "https://github.com/encounter/dawn/archive/${AURORA_DAWN_REF}.tar.gz"
+       DOWNLOAD_EXTRACT_TIMESTAMP FALSE
++      ${_aurora_dawn_patch_args}
+       EXCLUDE_FROM_ALL
+     )
+     FetchContent_MakeAvailable(dawn)
+diff --git a/cmake/aurora_core.cmake b/cmake/aurora_core.cmake
+index 0a5178a..d3cdd26 100644
+--- a/cmake/aurora_core.cmake
++++ b/cmake/aurora_core.cmake
+@@ -97,7 +97,10 @@ if (AURORA_ENABLE_GX)
+         set_source_files_properties(lib/dawn/TracyPlatform.cpp PROPERTIES COMPILE_FLAGS -fno-rtti)
+     endif ()
+     target_link_libraries(aurora_core PRIVATE dawn::webgpu_dawn)
+-    if (APPLE AND DAWN_ENABLE_METAL)
++    # tvOS uses the stub: the tvOS SDK ships MetalFX, but metalfx.mm is written
++    # against the macOS/iOS availability of MetalFX and IOSurface, and no Apple
++    # TV GPU older than Apple7 can run MetalFX anyway.
++    if (APPLE AND DAWN_ENABLE_METAL AND NOT CMAKE_SYSTEM_NAME STREQUAL "tvOS")
+         find_library(AURORA_METALFX_FRAMEWORK MetalFX)
+     endif ()
+     if (APPLE AND DAWN_ENABLE_METAL AND AURORA_METALFX_FRAMEWORK)
+diff --git a/cmake/patches/apply-dawn-tvos-gpu-family.cmake b/cmake/patches/apply-dawn-tvos-gpu-family.cmake
+new file mode 100644
+index 0000000..3887d63
+--- /dev/null
++++ b/cmake/patches/apply-dawn-tvos-gpu-family.cmake
+@@ -0,0 +1,91 @@
++# Source-level fix applied to a vendored Dawn tree for tvOS builds.
++#
++# Dawn's Metal backend skips its GPU-family checks on tvOS and assumes every
++# Apple TV GPU supports base-vertex/base-instance draws and sampler compare
++# functions. Both need Metal GPU family Apple3 (A10X, the first Apple TV 4K);
++# the Apple TV HD's A8 is family Apple2. These replacements make the tvOS
++# device path query the family like the iOS path does, so on an A8 Dawn turns
++# on DisableBaseVertex/DisableBaseInstance/MetalDisableSamplerCompare (and keeps
++# emulating StoreAndMultisampleResolve) instead of encoding Metal calls the GPU
++# cannot execute. The Apple TV Simulator renders on the host GPU, so it keeps
++# Dawn's original behaviour, mirroring Dawn's own iOS Simulator exemption.
++#
++# Each replacement is exact, checked and idempotent, like AuroraSDL3Patches.cmake:
++# an already-patched tree is left alone; a tree where an anchor is missing (a
++# different Dawn revision) stops the configure instead of silently building
++# without the fix.
++#
++# Used two ways:
++#   - included by AuroraDawnProvider.cmake, which calls
++#     aurora_dawn_apply_tvos_patches() on a pre-provided FETCHCONTENT_SOURCE_DIR_DAWN;
++#   - run as `cmake -DDAWN_SOURCE_DIR=<dir> -P apply-dawn-tvos-gpu-family.cmake`
++#     from the FetchContent PATCH_COMMAND for a freshly extracted tarball.
++
++function(_aurora_dawn_tvos_replace file description old new)
++  file(READ "${file}" _content)
++  string(FIND "${_content}" "${new}" _already)
++  if (NOT _already EQUAL -1)
++    return()
++  endif ()
++  string(FIND "${_content}" "${old}" _anchor)
++  if (_anchor EQUAL -1)
++    message(FATAL_ERROR "aurora: Dawn tvOS patch '${description}' does not apply to ${file}; "
++      "the vendored Dawn revision changed, review cmake/patches/apply-dawn-tvos-gpu-family.cmake")
++  endif ()
++  string(REPLACE "${old}" "${new}" _content "${_content}")
++  file(WRITE "${file}" "${_content}")
++  message(STATUS "aurora: Dawn tvOS patch applied: ${description}")
++endfunction()
++
++function(aurora_dawn_apply_tvos_patches dawn_source_dir)
++  set(_physical "${dawn_source_dir}/src/dawn/native/metal/PhysicalDeviceMTL.mm")
++  if (NOT EXISTS "${_physical}")
++    message(FATAL_ERROR "aurora: Dawn source tree at ${dawn_source_dir} has no PhysicalDeviceMTL.mm")
++  endif ()
++
++  _aurora_dawn_tvos_replace("${_physical}" "tvOS StoreAndMultisampleResolve needs Apple3"
++[==[        haveStoreAndMSAAResolve = true;
++#endif
++#endif
++        // On tvOS, we would need MTLFeatureSet_tvOS_GPUFamily2_v1.
++]==]
++[==[        haveStoreAndMSAAResolve = true;
++#endif
++#elif DAWN_PLATFORM_IS(TVOS) && !TARGET_OS_SIMULATOR
++        // aurora tvOS patch: Apple3 (A10X, Apple TV 4K) and later; the Apple TV
++        // HD's A8 is Apple2 and keeps the emulation.
++        haveStoreAndMSAAResolve = [*mDevice supportsFamily:MTLGPUFamilyApple3];
++#endif
++]==])
++
++  _aurora_dawn_tvos_replace("${_physical}" "tvOS sampler compare needs Apple3"
++[==[        haveSamplerCompare = [*mDevice supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
++#endif
++        // TODO(crbug.com/dawn/342): Investigate emulation -- possibly expensive.
++]==]
++[==[        haveSamplerCompare = [*mDevice supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
++#elif DAWN_PLATFORM_IS(TVOS) && !TARGET_OS_SIMULATOR
++        // aurora tvOS patch: sampler compare functions need Apple3; not the A8.
++        haveSamplerCompare = [*mDevice supportsFamily:MTLGPUFamilyApple3];
++#endif
++        // TODO(crbug.com/dawn/342): Investigate emulation -- possibly expensive.
++]==])
++
++  _aurora_dawn_tvos_replace("${_physical}" "tvOS base vertex/instance needs Apple3"
++[==[        haveBaseVertexBaseInstance = [*mDevice supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
++#endif
++        // TODO(crbug.com/dawn/343): Investigate emulation.
++]==]
++[==[        haveBaseVertexBaseInstance = [*mDevice supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
++#elif DAWN_PLATFORM_IS(TVOS) && !TARGET_OS_SIMULATOR
++        // aurora tvOS patch: base vertex/instance draws need Apple3; not the A8.
++        haveBaseVertexBaseInstance = [*mDevice supportsFamily:MTLGPUFamilyApple3];
++#endif
++        // TODO(crbug.com/dawn/343): Investigate emulation.
++]==])
++endfunction()
++
++# Script mode (FetchContent PATCH_COMMAND).
++if (CMAKE_SCRIPT_MODE_FILE AND DEFINED DAWN_SOURCE_DIR)
++  aurora_dawn_apply_tvos_patches("${DAWN_SOURCE_DIR}")
++endif ()
+diff --git a/lib/system_info.cpp b/lib/system_info.cpp
+index 0361263..82500b5 100644
+--- a/lib/system_info.cpp
++++ b/lib/system_info.cpp
+@@ -168,13 +168,14 @@ uint64_t GetMemoryAmount() {
+ }
+ 
+ std::string GetOSVersion() {
+-#if TARGET_OS_MAC
+-  constexpr auto name = "macOS";
++  // TARGET_OS_MAC is 1 on every Darwin platform, so test the specific ones first.
++#if TARGET_OS_TV
++  constexpr auto name = "tvOS";
+ #elif TARGET_OS_IOS
+   constexpr auto name = "iOS";
+-#elif TARGET_OS_TV
+-  constexpr auto name = "tvOS";
+-#elif
++#elif TARGET_OS_MAC
++  constexpr auto name = "macOS";
++#else
+   constexpr auto name = Unknown;
+ #endif
+ 

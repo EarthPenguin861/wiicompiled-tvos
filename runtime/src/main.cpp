@@ -77,10 +77,24 @@
 #include "runtime_log.h"
 #include "runtime_product.h"
 #include "recomp_mod_loader.h"
+#include "platform/apple_target.h"
+#if MKW_HOST_TVOS
+#include "platform/tvos_app.h"
+#endif
 #include <aurora/aurora.h>
 #include <aurora/gfx.h>
 #include <dolphin/gx/GXAurora.h>
 #include <dolphin/vi.h>
+
+// Apple TV builds have no Discord client to talk to and no general Bluetooth
+// HID access for Wii Remotes (tvOS only exposes GameController devices).
+#if MKW_HOST_TVOS
+inline constexpr bool kHostSupportsDiscordPresence = false;
+inline constexpr bool kHostSupportsWiiRemotes = false;
+#else
+inline constexpr bool kHostSupportsDiscordPresence = true;
+inline constexpr bool kHostSupportsWiiRemotes = true;
+#endif
 
 // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
 extern std::atomic_bool g_auroraFrameActive;
@@ -1375,7 +1389,7 @@ int RuntimeMain(int argc, char** argv) {
             AudioBackend::Instance().SetSilenced(true);
         }
         RuntimeConfigFile::LogLoadedConfig();
-        if (!g_headless && RuntimeConfigFile::DiscordPresenceEnabled()) {
+        if (!g_headless && kHostSupportsDiscordPresence && RuntimeConfigFile::DiscordPresenceEnabled()) {
             DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
         }
         SystemBridge::Initialize();
@@ -1468,7 +1482,7 @@ int RuntimeMain(int argc, char** argv) {
 
         // SDL reads its device hints when the joystick subsystem starts, which
         // aurora_initialize does.
-        Wiimote::ConfigureSdlHints(RuntimeConfigFile::WiiRemotesEnabled());
+        Wiimote::ConfigureSdlHints(kHostSupportsWiiRemotes && RuntimeConfigFile::WiiRemotesEnabled());
 
         const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
         if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
@@ -1585,6 +1599,11 @@ int RuntimeMain(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
+#if MKW_HOST_TVOS
+    // UIKit must own the process; the runtime starts once launching finishes.
+    return RuntimeTvos::RunApplication(argc, argv, &RuntimeMain);
+#else
     return RuntimeMain(argc, argv);
+#endif
 }
 extern "C" bool g_dynamicAspectRatioEnabled = false;

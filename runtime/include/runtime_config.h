@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 #include <toml.hpp>
+#include "platform/apple_target.h"
 #include "platform/host_platform.h"
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1033,9 +1034,21 @@ inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
     return ResolveRelativeTo(ResolveConfigPath().parent_path(), value);
 }
 
+// The tvOS build copies the user's extracted DATA directory into the app bundle
+// (Launcher/tvos/build-tvos.command), because an Apple TV app has no other
+// place to read gigabytes of game files from and no way to edit Config.toml.
+inline constexpr const char* kTvosBundledDvdRootName = "DATA";
+
 // The extracted DATA directory. Empty when nothing is configured.
 inline std::filesystem::path ResolvedDvdRoot() {
     const std::string configured = DvdRoot();
+#if MKW_HOST_TVOS
+    if (configured.empty()) {
+        if (const auto executableDirectory = ExecutableDirectory()) {
+            return (*executableDirectory / kTvosBundledDvdRootName).lexically_normal();
+        }
+    }
+#endif
     return configured.empty() ? std::filesystem::path{} : ResolveRelativeToConfig(configured);
 }
 

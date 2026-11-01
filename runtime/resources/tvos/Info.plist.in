@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  tvOS application Info.plist template. cmake/PublicProducts.cmake fills in the
+  MKW_TVOS_PLIST_* placeholders per product with configure_file in at-only mode.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>@MKW_TVOS_PLIST_DISPLAY_NAME@</string>
+	<key>CFBundleExecutable</key>
+	<string>@MKW_TVOS_PLIST_EXECUTABLE@</string>
+	<key>CFBundleIdentifier</key>
+	<string>@MKW_TVOS_PLIST_IDENTIFIER@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>@MKW_TVOS_PLIST_DISPLAY_NAME@</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@MKW_TVOS_PLIST_SHORT_VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>@MKW_TVOS_PLIST_SUPPORTED_PLATFORM@</string>
+	</array>
+	<key>DTPlatformName</key>
+	<string>@MKW_TVOS_PLIST_DT_PLATFORM@</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>@MKW_TVOS_PLIST_MINIMUM_OS@</string>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>3</integer>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<!-- A full controller is required to play; the Siri Remote can drive the settings bar. -->
+	<key>GCSupportedGameControllers</key>
+	<array>
+		<dict>
+			<key>ProfileName</key>
+			<string>ExtendedGamepad</string>
+		</dict>
+		<dict>
+			<key>ProfileName</key>
+			<string>MicroGamepad</string>
+		</dict>
+	</array>
+	<key>GCSupportsControllerUserInteraction</key>
+	<true/>
+	<!--
+	  SDL's HIDAPI layer can reach CoreBluetooth on tvOS; without this string the
+	  system terminates an app that touches CoreBluetooth. WiiCompiled itself never
+	  starts Bluetooth on tvOS, so in practice the prompt is not expected to appear.
+	-->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Bluetooth is used only to talk to game controllers.</string>
+</dict>
+</plist>

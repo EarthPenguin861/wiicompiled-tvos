@@ -17,6 +17,15 @@ endif()
 # target-specific performance on the table.
 if(MKW_HOST_IS_X86_64)
     set(MKW_BASELINE_ARCH_FLAG -march=x86-64-${MKW_X86_CPU_PROFILE})
+elseif(MKW_PLATFORM_TVOS)
+    # tvOS is always cross-compiled on a Mac, so -mcpu=native would describe the
+    # build machine (an M-series CPU with ARMv8.4+ instructions the Apple TV
+    # cannot execute). Target the oldest Apple TV the build must run on instead:
+    # apple-a8 is the Apple TV HD (ARMv8.0); an Apple TV 4K-only build may use
+    # apple-a10 (1st gen), apple-a12 (2nd gen) or apple-a15 (3rd gen).
+    set(MKW_TVOS_CPU "apple-a8" CACHE STRING
+        "Oldest Apple TV CPU the tvOS build runs on (apple-a8 = Apple TV HD)")
+    set(MKW_BASELINE_ARCH_FLAG -mcpu=${MKW_TVOS_CPU})
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(MKW_BASELINE_ARCH_FLAG -mcpu=native)
 else()

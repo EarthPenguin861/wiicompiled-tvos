@@ -539,15 +539,49 @@ MKW_MEMORY_FORCE_INLINE void WriteResolvedFloat64(uint8_t* r, uint32_t o, uint32
 
 template <typename T>
 MKW_MEMORY_FORCE_INLINE T FlatLoad(uint32_t address) {
+#if defined(MKW_GUEST_FLAT_VIEW_UNAVAILABLE)
+    // No flat guest view on this host (guest_abi/flat_memory.h): use the checked
+    // page-table path, which returns host byte order exactly like the swap below.
+    static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
+                  "FlatLoad supports 8/16/32/64-bit scalars");
+    if constexpr (sizeof(T) == 1) {
+        return static_cast<T>(Memory::Read8(address));
+    } else if constexpr (sizeof(T) == 2) {
+        return static_cast<T>(Memory::Read16(address));
+    } else if constexpr (sizeof(T) == 4) {
+        return static_cast<T>(Memory::Read32(address));
+    } else {
+        return static_cast<T>(Memory::Read64(address));
+    }
+#else
     T value{};
     std::memcpy(&value, MKW_FLAT_GUEST_BASE + address, sizeof(T));
     return MaybeByteSwap(value);
+#endif
 }
 
 template <typename T>
 MKW_MEMORY_FORCE_INLINE void FlatStore(uint32_t address, T value) {
+#if defined(MKW_GUEST_FLAT_VIEW_UNAVAILABLE)
+    // Also reached by the translator's FlatWriteRam* stores. The checked path
+    // takes the bias-table fast path for ordinary RAM and additionally applies
+    // the executable-write and MMIO policy the flat view enforces with page
+    // protections on the hosts that have one.
+    static_assert(sizeof(T) == 1 || sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8,
+                  "FlatStore supports 8/16/32/64-bit scalars");
+    if constexpr (sizeof(T) == 1) {
+        Memory::Write8(address, static_cast<uint8_t>(value));
+    } else if constexpr (sizeof(T) == 2) {
+        Memory::Write16(address, static_cast<uint16_t>(value));
+    } else if constexpr (sizeof(T) == 4) {
+        Memory::Write32(address, static_cast<uint32_t>(value));
+    } else {
+        Memory::Write64(address, static_cast<uint64_t>(value));
+    }
+#else
     const T swapped = MaybeByteSwap(value);
     std::memcpy(MKW_FLAT_GUEST_BASE + address, &swapped, sizeof(T));
+#endif
 }
 
 MKW_MEMORY_FORCE_INLINE uint8_t FlatRead8(uint32_t address) {

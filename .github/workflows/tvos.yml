@@ -1,0 +1,118 @@
+# Builds the Apple TV app (docs/building-tvos.md) on a GitHub-hosted Mac.
+#
+# Game data never enters the repository. It is uploaded once, AES-256 encrypted, as the assets of
+# the release tagged `game-data` (Launcher/tvos/encrypt-game-data.sh), and decrypted here with the
+# MKW_DATA_KEY repository secret. The finished, ad-hoc signed WiiCompiled.ipa contains the game,
+# so it is encrypted with the same key before it is published as the release `tvos-<run number>`;
+# Launcher/tvos/fetch-ipa.sh downloads and decrypts it on your own machine for atvloadly.
+name: tvOS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      cpu:
+        description: Oldest Apple TV the build must run on
+        type: choice
+        default: apple-a8
+        options:
+          - apple-a8    # Apple TV HD and every Apple TV 4K
+          - apple-a10   # Apple TV 4K (1st generation) and later
+          - apple-a12   # Apple TV 4K (2nd generation) and later
+          - apple-a15   # Apple TV 4K (3rd generation)
+
+permissions:
+  contents: write   # download game-data assets, publish the encrypted IPA release
+
+concurrency:
+  group: tvos-build
+  cancel-in-progress: false
+
+jobs:
+  tvos:
+    runs-on: macos-15
+    timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
+      MKW_DATA_KEY: ${{ secrets.MKW_DATA_KEY }}
+    steps:
+      - name: Check the data key secret
+        run: |
+          if [ -z "$MKW_DATA_KEY" ]; then
+            echo "::error::The MKW_DATA_KEY repository secret is missing (see docs/building-tvos.md)."
+            exit 1
+          fi
+
+      - name: Free disk space
+        run: |
+          df -h /
+          selected=$(dirname "$(dirname "$(xcode-select -p)")")
+          echo "Selected Xcode: $selected"
+          # Other Xcode versions, simulator runtimes and the Android SDK are unused by a device build.
+          for xcode in /Applications/Xcode*.app; do
+            [ "$xcode" = "$selected" ] || sudo rm -rf "$xcode"
+          done
+          xcrun simctl runtime delete all >/dev/null 2>&1 || true
+          sudo rm -rf "${ANDROID_HOME:-/nonexistent}" "$HOME/Library/Android" /usr/local/share/android-sdk || true
+          df -h /
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Apply the aurora tvOS patch
+        run: git -C aurora-main apply --verbose ../tvos-port-patches/aurora-tvos.patch
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Tools
+        run: |
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          echo "OPENSSL=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk appletvos --show-sdk-path
+          cmake --version | head -n 1
+          ninja --version
+          dotnet --list-sdks
+          sysctl -n hw.ncpu hw.memsize
+
+      - name: Restore the game data
+        run: |
+          mkdir -p "$RUNNER_TEMP/game" Assets
+          gh release download game-data --dir "$RUNNER_TEMP/game" --pattern 'mkw-data.tar.enc.part-*'
+          cat "$RUNNER_TEMP"/game/mkw-data.tar.enc.part-* \
+            | "$OPENSSL" enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -pass env:MKW_DATA_KEY \
+            | tar -xf - -C Assets
+          rm -rf "$RUNNER_TEMP/game"
+          cp Assets/DATA/sys/main.dol Assets/main.dol
+          cp Assets/DATA/files/rel/StaticR.rel Assets/StaticR.rel
+          shasum -a 256 Assets/main.dol Assets/StaticR.rel
+          du -sh Assets/DATA
+          df -h /
+
+      - name: Build WiiCompiled for tvOS
+        run: |
+          bash Launcher/tvos/build-tvos.command \
+            --output-dir "$RUNNER_TEMP/out" \
+            --cpu "${{ inputs.cpu }}" \
+            --adhoc-sign \
+            --ipa
+          df -h /
+
+      - name: Publish the encrypted IPA
+        run: |
+          out="$RUNNER_TEMP/out"
+          # The app copy is no longer needed and holds another copy of the game data.
+          rm -rf "$out/WiiCompiled.app"
+          "$OPENSSL" enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -salt -pass env:MKW_DATA_KEY \
+            -in "$out/WiiCompiled.ipa" \
+            | split -b 1900m - "$out/WiiCompiled.ipa.enc.part-"
+          rm -f "$out/WiiCompiled.ipa"
+          ls -l "$out"
+          tag="tvos-${{ github.run_number }}"
+          gh release create "$tag" "$out"/WiiCompiled.ipa.enc.part-* \
+            --target "${{ github.sha }}" \
+            --title "WiiCompiled tvOS build ${{ github.run_number }} (${{ inputs.cpu }})" \
+            --notes "Encrypted WiiCompiled.ipa (built for ${{ inputs.cpu }}). Download and decrypt with: bash Launcher/tvos/fetch-ipa.sh KEY_FILE OUT_DIR $tag"

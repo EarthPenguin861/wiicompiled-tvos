@@ -11,6 +11,7 @@
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "wiimote_host.h"
+#include "platform/apple_target.h"
 
 #include <imgui.h>
 #include <SDL3/SDL_events.h>
@@ -56,6 +57,20 @@ namespace AxDspHle {
 void SetMixWorkerEnabled(bool enabled);
 }
 
+// How the settings bar is opened and closed. An Apple TV has neither F10 nor a
+// mouse: the bar toggles with the controller button in the "Select" position -
+// SDL's BACK: View on Xbox, Share/Create on PlayStation, Options on MFi pads
+// (a PlayStation pad's own "Options" button is SDL's START and stays the game's
+// Start) - or the Siri Remote's Play/Pause button. Its menus are driven by ImGui
+// keyboard/gamepad navigation while it owns input.
+#if MKW_HOST_TVOS
+#define MKW_SETTINGS_TOGGLE_HINT "View / Share / Create (or Play/Pause on the Siri Remote)"
+#define MKW_SETTINGS_TOGGLE_SHORT "View"
+#else
+#define MKW_SETTINGS_TOGGLE_HINT "F10"
+#define MKW_SETTINGS_TOGGLE_SHORT "F10"
+#endif
+
 namespace settings_overlay {
 namespace {
 
@@ -75,6 +90,9 @@ const char* GraphicsApiDisplayName() {
 }
 
 bool g_topBarVisible = false;
+#if MKW_HOST_TVOS
+bool g_focusTopBarPending = false;
+#endif
 bool g_exitPromptOpen = false;
 bool g_restartPromptOpen = false;
 bool g_rumbleEnabled = RuntimeConfigFile::RumbleEnabled(true);
@@ -249,6 +267,9 @@ void SetTopBarVisible(bool visible) {
         return;
     }
     g_topBarVisible = visible;
+#if MKW_HOST_TVOS
+    g_focusTopBarPending = visible;
+#endif
 }
 
 void ApplyConfiguredMappings() {
@@ -328,6 +349,17 @@ void DrawWiiRemoteSetup() {
     if (!ImGui::CollapsingHeader("Wii Remote setup (Bluetooth)")) {
         return;
     }
+#if MKW_HOST_TVOS
+    // main.cpp never starts the Wii Remote host on tvOS: apps there can only
+    // reach controllers through the GameController framework.
+    ImGui::Indent();
+    PushMenuTextWrap();
+    ImGui::TextDisabled("Wii Remotes are not available on Apple TV: tvOS gives apps no access to "
+                        "Bluetooth HID devices. Use an MFi, Xbox or PlayStation controller.");
+    ImGui::PopTextWrapPos();
+    ImGui::Unindent();
+    return;
+#endif
     ImGui::Indent();
     PushMenuTextWrap();
     const std::string notice = Wiimote::PlatformNotice();
@@ -1120,7 +1152,13 @@ void DrawAudioSettings() {
         MusicAttenuation::SetEnabled(g_attenuateMusicWhenMediaPlays);
         RuntimeConfigFile::SetAttenuateMusicWhenMediaPlays(g_attenuateMusicWhenMediaPlays);
     }
-#if defined(__APPLE__)
+#if MKW_HOST_TVOS
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip(
+            "Mutes the game's music while another app, such as Music, is playing audio "
+            "in the background.");
+    }
+#elif defined(__APPLE__)
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Detects other apps with active audio output on macOS 14.2 or later. "
@@ -1133,7 +1171,9 @@ void DrawAudioSettings() {
         } else if (!MusicAttenuation::IsMediaControlInitializationComplete()) {
             ImGui::TextDisabled("Checking external audio...");
         } else if (!MusicAttenuation::IsMediaControlAvailable()) {
-#if defined(__APPLE__)
+#if MKW_HOST_TVOS
+            ImGui::TextDisabled("External audio detection is unavailable.");
+#elif defined(__APPLE__)
             ImGui::TextDisabled("External audio detection unavailable (requires macOS 14.2 or later).");
 #else
             ImGui::TextDisabled("Media controls are unavailable.");
@@ -1238,7 +1278,9 @@ void DrawGraphicsSettings() {
     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
     ImGui::TextDisabled("Frame interpolation is experimental, you might find visual artifacts");
     ImGui::PopTextWrapPos();
-#if defined(__APPLE__)
+    // tvOS builds aurora's MetalFX stub (no Apple TV GPU this port targets has
+    // MetalFX), so the control would only ever read "unsupported" there.
+#if defined(__APPLE__) && !MKW_HOST_TVOS
     const bool metalFxSupported = aurora_is_metalfx_spatial_supported();
     ImGui::BeginDisabled(!metalFxSupported);
     if (ImGui::Checkbox("MetalFX spatial upscaling", &g_metalFxSpatialUpscaling)) {
@@ -1407,7 +1449,7 @@ void DrawStartupScreen() {
             ImGui::TextUnformatted(line);
             nextY = ImGui::GetCursorPosY() + 4.0f;
         }
-        constexpr const char* kHint = "Press F10 to open settings";
+        constexpr const char* kHint = "Press " MKW_SETTINGS_TOGGLE_HINT " to open settings";
         ImGui::SetWindowFontScale(0.8f);
         const ImVec2 hintSize = ImGui::CalcTextSize(kHint);
         ImGui::SetCursorPos(ImVec2(std::max(0.0f, (viewport->Size.x - hintSize.x) * 0.5f), nextY));
@@ -1477,12 +1519,21 @@ void DrawTopBar() {
                      ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoSavedSettings |
                      ImGuiWindowFlags_NoFocusOnAppearing)) {
         for (const char* line : {"Settings open - game controls disabled.",
-                                 "Press F10 to return to the game."}) {
+                                 "Press " MKW_SETTINGS_TOGGLE_HINT " to return to the game."}) {
             ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize(line).x) * 0.5f);
             ImGui::TextUnformatted(line);
         }
     }
     ImGui::End();
+#if MKW_HOST_TVOS
+    // Without a mouse, navigation needs a focused window to start from: give the
+    // menu bar focus once each time the bar opens (it applies to the window
+    // BeginMainMenuBar creates next).
+    if (g_focusTopBarPending) {
+        ImGui::SetNextWindowFocus();
+        g_focusTopBarPending = false;
+    }
+#endif
     if (!ImGui::BeginMainMenuBar()) return;
 
     ImGui::TextUnformatted("WiiCompiled");
@@ -1534,11 +1585,11 @@ void DrawTopBar() {
     }
 
     const ImGuiStyle& style = ImGui::GetStyle();
-    const float hideWidth = ImGui::CalcTextSize("Hide (F10)").x + style.FramePadding.x * 2.0f;
+    const float hideWidth = ImGui::CalcTextSize("Hide (" MKW_SETTINGS_TOGGLE_SHORT ")").x + style.FramePadding.x * 2.0f;
     const float exitWidth = ImGui::CalcTextSize("X").x + style.FramePadding.x * 2.0f;
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(),
                                   ImGui::GetWindowWidth() - hideWidth - exitWidth - style.ItemSpacing.x - 8.0f));
-    if (ImGui::MenuItem("Hide (F10)")) {
+    if (ImGui::MenuItem("Hide (" MKW_SETTINGS_TOGGLE_SHORT ")")) {
         SetTopBarVisible(false);
     }
     if (ImGui::MenuItem("X")) {
@@ -1562,6 +1613,37 @@ bool ValveControllerConnected() {
 bool IsToggleKey(const SDL_Event& event, SDL_Scancode code) {
     return event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat && event.key.scancode == code;
 }
+
+#if MKW_HOST_TVOS
+bool IsGamepadButtonPress(const SDL_Event& event, SDL_GamepadButton button) {
+    return event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+           event.gbutton.button == static_cast<Uint8>(button);
+}
+
+// The Apple TV has no mouse, so the settings bar and its prompts are navigated
+// with the controller (D-pad, A to select, B to go back) or the Siri Remote
+// (arrows, Select, Menu). Navigation is only switched on while those menus own
+// input - the game's input is blocked then anyway - so ImGui can never capture
+// controller or remote input during play. It stays off while a binding is being
+// recorded, where the pressed button must reach the rebind logic and not
+// activate the focused widget.
+void UpdateTvosMenuNavigation() {
+    if (ImGui::GetCurrentContext() == nullptr) {
+        return;
+    }
+    const bool recording = g_rebind.active || controller_mapping_wizard::IsActive();
+    const bool menusOwnInput =
+        !recording && (g_topBarVisible || g_exitPromptOpen || g_restartPromptOpen);
+    constexpr ImGuiConfigFlags kNavigation =
+        ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+    ImGuiIO& io = ImGui::GetIO();
+    if (menusOwnInput) {
+        io.ConfigFlags |= kNavigation;
+    } else {
+        io.ConfigFlags &= ~kNavigation;
+    }
+}
+#endif
 
 bool IsMouseActivity(const SDL_Event& event) {
     switch (event.type) {
@@ -1611,6 +1693,9 @@ void ApplyInputBlockState() {
                          g_exitPromptOpen || g_restartPromptOpen || g_topBarVisible || StartupScreenVisible();
     PADBlockInput(blocked);
     InputBindings::SetInputBlocked(blocked);
+#if MKW_HOST_TVOS
+    UpdateTvosMenuNavigation();
+#endif
 }
 } // namespace
 
@@ -1663,7 +1748,16 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             CompleteRebind(g_rebind.kind == RebindKind::Controller ? PAD_NATIVE_BUTTON_DISABLED
                                                                   : static_cast<uint32_t>(PAD_KEY_INVALID));
         }
-        if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_F10)) {
+        bool settingsToggle = IsToggleKey(ev->sdl, SDL_SCANCODE_F10);
+#if MKW_HOST_TVOS
+        // Siri Remote Play/Pause arrives as the Pause key; the controller's
+        // Select-position button (View/Share/Create) is SDL's BACK, unbound by
+        // default in the GameCube mapping.
+        settingsToggle = settingsToggle || IsToggleKey(ev->sdl, SDL_SCANCODE_PAUSE) ||
+                         (!controller_mapping_wizard::IsActive() &&
+                          IsGamepadButtonPress(ev->sdl, SDL_GAMEPAD_BUTTON_BACK));
+#endif
+        if (!g_rebind.active && settingsToggle) {
             SetTopBarVisible(!g_topBarVisible);
             ApplyInputBlockState();
         }

@@ -35,6 +35,55 @@ if(MKW_PLATFORM_MACOS)
     find_library(MKW_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
 endif()
 
+if(MKW_PLATFORM_TVOS)
+    # The one Objective-C++ runtime source (AVAudioSession). It is kept out of
+    # mkw_runtime_common so the runtime's C++ unity batches and precompiled
+    # header never have to be generated for Objective-C++.
+    add_library(mkw_tvos_objc STATIC
+        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/external_audio_tvos.mm")
+    target_include_directories(mkw_tvos_objc PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include")
+    target_compile_features(mkw_tvos_objc PRIVATE cxx_std_17)
+    target_compile_options(mkw_tvos_objc PRIVATE -fobjc-arc -O2 -w)
+    set_target_properties(mkw_tvos_objc PROPERTIES UNITY_BUILD OFF)
+
+    # Values shared by every product's Info.plist.
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+        set(MKW_TVOS_PLIST_SUPPORTED_PLATFORM "AppleTVSimulator")
+        set(MKW_TVOS_PLIST_DT_PLATFORM "appletvsimulator")
+    else()
+        set(MKW_TVOS_PLIST_SUPPORTED_PLATFORM "AppleTVOS")
+        set(MKW_TVOS_PLIST_DT_PLATFORM "appletvos")
+    endif()
+    set(MKW_TVOS_PLIST_MINIMUM_OS "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    # CFBundleShortVersionString must be one to three dot-separated integers.
+    if(MKW_SETUP_VERSION MATCHES "^([0-9]+(\\.[0-9]+)?(\\.[0-9]+)?)")
+        set(MKW_TVOS_PLIST_SHORT_VERSION "${CMAKE_MATCH_1}")
+    else()
+        set(MKW_TVOS_PLIST_SHORT_VERSION "1.0")
+    endif()
+endif()
+
+# Turns a product into an Apple TV application bundle: Info.plist, the
+# Objective-C++ runtime object and the frameworks the runtime calls directly
+# (SDL3's static target already carries UIKit, GameController, Metal and the
+# rest). The bundle is flat on tvOS, so the resources mkw_configure_product
+# copies to $<TARGET_FILE_DIR> land in the bundle root beside the executable,
+# exactly where RuntimeConfigFile::ExecutableDirectory() looks for them.
+function(mkw_configure_tvos_bundle target display_name bundle_identifier)
+    set(MKW_TVOS_PLIST_EXECUTABLE "${target}")
+    set(MKW_TVOS_PLIST_DISPLAY_NAME "${display_name}")
+    set(MKW_TVOS_PLIST_IDENTIFIER "${bundle_identifier}")
+    set(_plist "${CMAKE_BINARY_DIR}/tvos/${target}-Info.plist")
+    configure_file("${MKW_RUNTIME_SOURCE_DIR}/resources/tvos/Info.plist.in" "${_plist}" @ONLY)
+    set_target_properties(${target} PROPERTIES
+        MACOSX_BUNDLE TRUE
+        MACOSX_BUNDLE_INFO_PLIST "${_plist}"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "${bundle_identifier}"
+        MACOSX_BUNDLE_BUNDLE_NAME "${display_name}"
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${bundle_identifier}")
+    target_link_libraries(${target} PRIVATE mkw_tvos_objc "-framework AVFoundation" "-framework Foundation")
+endfunction()
+
 function(mkw_apply_translated_compile_options target)
     target_compile_options(${target} PRIVATE
         -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -mllvm -hot-cold-split=true -w -pipe)
@@ -308,6 +357,9 @@ endfunction()
 add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}")
 mkw_configure_product(WiiCompiled)
 mkw_add_product_icon(WiiCompiled)
+if(MKW_PLATFORM_TVOS)
+    mkw_configure_tvos_bundle(WiiCompiled "WiiCompiled" "${MKW_TVOS_BUNDLE_IDENTIFIER}")
+endif()
 target_sources(WiiCompiled PRIVATE $<TARGET_OBJECTS:mkw_base_registration>)
 target_precompile_headers(WiiCompiled PRIVATE
     "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
@@ -319,6 +371,11 @@ if(MKW_HAVE_RETRO_REWIND)
     add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}")
     mkw_configure_product(RetroRewind)
     mkw_add_product_icon(RetroRewind)
+    if(MKW_PLATFORM_TVOS)
+        # Builds, but the tvOS port only supports and documents the base game:
+        # see docs/building-tvos.md.
+        mkw_configure_tvos_bundle(RetroRewind "Retro Rewind" "${MKW_TVOS_BUNDLE_IDENTIFIER}.retrorewind")
+    endif()
     target_precompile_headers(RetroRewind REUSE_FROM WiiCompiled)
     target_sources(RetroRewind PRIVATE $<TARGET_OBJECTS:mkw_retro_registration>)
     if(TARGET mkw_retro_sensitive)
