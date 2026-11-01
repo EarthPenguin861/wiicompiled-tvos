@@ -1328,7 +1328,13 @@ static void TerminateHandler() {
             RT_LOG(RT_TAG_RUNTIME) << "Unhandled C++ exception: " << e.what() << std::endl;
         } catch (...) {
             terminateDetails = "Unhandled non-std C++ exception.";
-            RT_LOG(RT_TAG_RUNTIME) << "Unhandled non-std C++ exception." << std::endl;
+#if MKW_HOST_TVOS
+            // UIKit, SDL or Metal raising an NSException lands here; name it.
+            if (std::string objc = RuntimeTvos::DescribeObjCException(ex); !objc.empty()) {
+                terminateDetails = std::move(objc);
+            }
+#endif
+            RT_LOG(RT_TAG_RUNTIME) << terminateDetails << std::endl;
         }
     } else {
         terminateDetails = "std::terminate() without current exception.";

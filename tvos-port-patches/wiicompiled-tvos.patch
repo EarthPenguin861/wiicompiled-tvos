@@ -124,7 +124,7 @@ index 0000000..a198f87
 +            --title "WiiCompiled tvOS build ${{ github.run_number }} (${{ inputs.cpu }})" \
 +            --notes "Encrypted WiiCompiled.ipa (built for ${{ inputs.cpu }}). Download and decrypt with: bash Launcher/tvos/fetch-ipa.sh KEY_FILE OUT_DIR $tag"
 diff --git a/.gitignore b/.gitignore
-index 704d29c..37b7739 100644
+index 704d29c..c014f45 100644
 --- a/.gitignore
 +++ b/.gitignore
 @@ -28,6 +28,8 @@ Code.pul
@@ -136,6 +136,15 @@ index 704d29c..37b7739 100644
  /local-products/
  /dist/
  /out/
+@@ -76,3 +78,8 @@ output.txt
+ 
+ # Operating System
+ .DS_Store
++
++# Built tvOS apps contain the user's game: never commit them
++/IPA/
++*.ipa
++*.ipa.enc.part-*
 diff --git a/Launcher/tvos/build-tvos.command b/Launcher/tvos/build-tvos.command
 new file mode 100755
 index 0000000..585c0c6
@@ -1017,10 +1026,10 @@ index f0d4fd4..710dca1 100644
  set(MKW_RUNTIME_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
  include("${CMAKE_CURRENT_LIST_DIR}/cmake/RuntimeLibrary.cmake")
 diff --git a/runtime/cmake/PublicProducts.cmake b/runtime/cmake/PublicProducts.cmake
-index 809f22e..36aafcc 100644
+index 809f22e..3165221 100644
 --- a/runtime/cmake/PublicProducts.cmake
 +++ b/runtime/cmake/PublicProducts.cmake
-@@ -35,6 +35,55 @@ if(MKW_PLATFORM_MACOS)
+@@ -35,6 +35,56 @@ if(MKW_PLATFORM_MACOS)
      find_library(MKW_COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
  endif()
  
@@ -1029,7 +1038,8 @@ index 809f22e..36aafcc 100644
 +    # mkw_runtime_common so the runtime's C++ unity batches and precompiled
 +    # header never have to be generated for Objective-C++.
 +    add_library(mkw_tvos_objc STATIC
-+        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/external_audio_tvos.mm")
++        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/external_audio_tvos.mm"
++        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/objc_exception_tvos.mm")
 +    target_include_directories(mkw_tvos_objc PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include")
 +    target_compile_features(mkw_tvos_objc PRIVATE cxx_std_17)
 +    target_compile_options(mkw_tvos_objc PRIVATE -fobjc-arc -O2 -w)
@@ -1076,7 +1086,7 @@ index 809f22e..36aafcc 100644
  function(mkw_apply_translated_compile_options target)
      target_compile_options(${target} PRIVATE
          -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -mllvm -hot-cold-split=true -w -pipe)
-@@ -308,6 +357,9 @@ endfunction()
+@@ -308,6 +358,9 @@ endfunction()
  add_executable(WiiCompiled "${MKW_BASE_PRODUCT_SOURCE}")
  mkw_configure_product(WiiCompiled)
  mkw_add_product_icon(WiiCompiled)
@@ -1086,7 +1096,7 @@ index 809f22e..36aafcc 100644
  target_sources(WiiCompiled PRIVATE $<TARGET_OBJECTS:mkw_base_registration>)
  target_precompile_headers(WiiCompiled PRIVATE
      "${MKW_RUNTIME_SOURCE_DIR}/include/mkw_pch.h")
-@@ -319,6 +371,11 @@ if(MKW_HAVE_RETRO_REWIND)
+@@ -319,6 +372,11 @@ if(MKW_HAVE_RETRO_REWIND)
      add_executable(RetroRewind "${MKW_RETRO_REWIND_PRODUCT_SOURCE}")
      mkw_configure_product(RetroRewind)
      mkw_add_product_icon(RetroRewind)
@@ -1239,11 +1249,14 @@ index 0000000..d764ea6
 +#endif
 diff --git a/runtime/include/platform/tvos_app.h b/runtime/include/platform/tvos_app.h
 new file mode 100644
-index 0000000..b0e0e67
+index 0000000..8baf53d
 --- /dev/null
 +++ b/runtime/include/platform/tvos_app.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,22 @@
 +#pragma once
++
++#include <exception>
++#include <string>
 +
 +// Apple TV process entry. A tvOS app has to run inside UIApplicationMain, so
 +// main() hands control to UIKit through SDL_RunApp and the runtime starts once
@@ -1256,6 +1269,10 @@ index 0000000..b0e0e67
 +// Never returns while the app is running; returns the entry point's exit code
 +// if it ever finishes.
 +int RunApplication(int argc, char** argv, EntryPoint entry);
++
++// Name, reason and call stack of an Objective-C exception, or an empty string
++// when `exception` is not one (src/platform/tvos/objc_exception_tvos.mm).
++std::string DescribeObjCException(std::exception_ptr exception) noexcept;
 +
 +} // namespace RuntimeTvos
 diff --git a/runtime/include/runtime_config.h b/runtime/include/runtime_config.h
@@ -1366,7 +1383,7 @@ index 0000000..55092c1
 +</dict>
 +</plist>
 diff --git a/runtime/src/main.cpp b/runtime/src/main.cpp
-index 56bec9f..29f6f71 100644
+index 56bec9f..2a21509 100644
 --- a/runtime/src/main.cpp
 +++ b/runtime/src/main.cpp
 @@ -77,11 +77,25 @@
@@ -1395,7 +1412,22 @@ index 56bec9f..29f6f71 100644
  // Defined in `runtime/src/hle/vi.cpp` (used by GX/VI HLE).
  extern std::atomic_bool g_auroraFrameActive;
  extern "C" int g_gxFrameCount;
-@@ -1375,7 +1389,7 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1314,7 +1328,13 @@ static void TerminateHandler() {
+             RT_LOG(RT_TAG_RUNTIME) << "Unhandled C++ exception: " << e.what() << std::endl;
+         } catch (...) {
+             terminateDetails = "Unhandled non-std C++ exception.";
+-            RT_LOG(RT_TAG_RUNTIME) << "Unhandled non-std C++ exception." << std::endl;
++#if MKW_HOST_TVOS
++            // UIKit, SDL or Metal raising an NSException lands here; name it.
++            if (std::string objc = RuntimeTvos::DescribeObjCException(ex); !objc.empty()) {
++                terminateDetails = std::move(objc);
++            }
++#endif
++            RT_LOG(RT_TAG_RUNTIME) << terminateDetails << std::endl;
+         }
+     } else {
+         terminateDetails = "std::terminate() without current exception.";
+@@ -1375,7 +1395,7 @@ int RuntimeMain(int argc, char** argv) {
              AudioBackend::Instance().SetSilenced(true);
          }
          RuntimeConfigFile::LogLoadedConfig();
@@ -1404,7 +1436,7 @@ index 56bec9f..29f6f71 100644
              DiscordPresence::Initialize(RuntimeConfigFile::DiscordClientId(), "Mario Kart Wii");
          }
          SystemBridge::Initialize();
-@@ -1468,7 +1482,7 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1468,7 +1488,7 @@ int RuntimeMain(int argc, char** argv) {
  
          // SDL reads its device hints when the joystick subsystem starts, which
          // aurora_initialize does.
@@ -1413,7 +1445,7 @@ index 56bec9f..29f6f71 100644
  
          const AuroraInfo auroraInfo = aurora_initialize(0, nullptr, &auroraConfig);
          if (auroraInfo.initializationStatus != AURORA_INITIALIZATION_SUCCESS) {
-@@ -1585,6 +1599,11 @@ int RuntimeMain(int argc, char** argv) {
+@@ -1585,6 +1605,11 @@ int RuntimeMain(int argc, char** argv) {
  }
  
  int main(int argc, char** argv) {
@@ -1685,6 +1717,58 @@ index 0000000..e50ed46
 +} // namespace GuestFlat
 +
 +#endif // MKW_HOST_TVOS
+diff --git a/runtime/src/platform/tvos/objc_exception_tvos.mm b/runtime/src/platform/tvos/objc_exception_tvos.mm
+new file mode 100644
+index 0000000..2a82e38
+--- /dev/null
++++ b/runtime/src/platform/tvos/objc_exception_tvos.mm
+@@ -0,0 +1,46 @@
++// Describes an in-flight Objective-C exception for the runtime's terminate handler.
++//
++// The runtime installs its own std::terminate handler, which replaces the Objective-C runtime's
++// "Terminating app due to uncaught exception" report. An NSException raised inside UIKit, SDL or
++// Metal (for example an unrecognized selector) would otherwise reach the crash log only as an
++// "unhandled non-std C++ exception" with no name, reason or stack. On Apple's 64-bit runtimes
++// Objective-C exceptions travel as C++ exceptions, so the captured exception_ptr can be rethrown
++// here and caught as an NSException.
++
++#include "platform/tvos_app.h"
++
++#import <Foundation/Foundation.h>
++
++#include <exception>
++#include <string>
++
++namespace RuntimeTvos {
++
++std::string DescribeObjCException(std::exception_ptr exception) noexcept {
++    if (!exception) {
++        return {};
++    }
++    try {
++        @try {
++            std::rethrow_exception(exception);
++        } @catch (NSException* objcException) {
++            NSMutableString* text = [NSMutableString
++                stringWithFormat:@"Objective-C exception %@: %@", objcException.name, objcException.reason];
++            NSArray<NSString*>* symbols = objcException.callStackSymbols;
++            const NSUInteger frames = MIN(symbols.count, (NSUInteger)48);
++            for (NSUInteger i = 0; i < frames; ++i) {
++                [text appendFormat:@"\n  %@", symbols[i]];
++            }
++            const char* utf8 = text.UTF8String;
++            return utf8 != nullptr ? std::string(utf8) : std::string("Objective-C exception (undescribable)");
++        } @catch (id other) {
++            const char* utf8 = [[other description] UTF8String];
++            return std::string("Objective-C exception object: ") + (utf8 != nullptr ? utf8 : "?");
++        }
++    } catch (...) {
++        // A C++ exception that is not an Objective-C object: nothing to add.
++    }
++    return {};
++}
++
++} // namespace RuntimeTvos
 diff --git a/runtime/src/platform/tvos/steam_input_layout_tvos.cpp b/runtime/src/platform/tvos/steam_input_layout_tvos.cpp
 new file mode 100644
 index 0000000..bbfb1a2
