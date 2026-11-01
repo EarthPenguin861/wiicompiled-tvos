@@ -75,6 +75,11 @@ if(MKW_PLATFORM_TVOS)
     # renderer never uses). Cross-compiled, protobuf also needs a host protoc, so leave it out.
     set(DAWN_BUILD_PROTOBUF OFF CACHE BOOL "" FORCE)
     set(TINT_BUILD_IR_BINARY OFF CACHE BOOL "" FORCE)
+    # aurora's thread layer uses std::jthread/std::stop_token. The libc++ in Xcode 16 still
+    # ships them as experimental, so expose them; both are header-only over the libc++
+    # synchronization primitives tvOS has had since 14. Directory-scoped and set before
+    # aurora is added, so aurora and its dependencies see it too; newer libc++ ignores it.
+    add_compile_definitions(_LIBCPP_ENABLE_EXPERIMENTAL)
 endif()
 
 if(MKW_PLATFORM_WINDOWS)
