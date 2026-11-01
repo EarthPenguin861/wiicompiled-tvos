@@ -71,6 +71,10 @@ if(MKW_PLATFORM_TVOS)
         "How to provide SDL3: auto, vendor (build from source), system (find_package/imported), or package (download prebuilt)")
     set(MKW_TVOS_BUNDLE_IDENTIFIER "local.wiicompiled.tvos" CACHE STRING
         "CFBundleIdentifier of the tvOS app; must match the provisioning profile used to sign it")
+    # Dawn builds protobuf only for Tint's IR binary format (a fuzzing/debugging aid the
+    # renderer never uses). Cross-compiled, protobuf also needs a host protoc, so leave it out.
+    set(DAWN_BUILD_PROTOBUF OFF CACHE BOOL "" FORCE)
+    set(TINT_BUILD_IR_BINARY OFF CACHE BOOL "" FORCE)
 endif()
 
 if(MKW_PLATFORM_WINDOWS)

@@ -1,9 +1,9 @@
 diff --git a/.github/workflows/tvos.yml b/.github/workflows/tvos.yml
 new file mode 100644
-index 0000000..48949c0
+index 0000000..a198f87
 --- /dev/null
 +++ b/.github/workflows/tvos.yml
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,119 @@
 +# Builds the Apple TV app (docs/building-tvos.md) on a GitHub-hosted Mac.
 +#
 +# Game data never enters the repository. It is uploaded once, AES-256 encrypted, as the assets of
@@ -12,6 +12,7 @@ index 0000000..48949c0
 +# so it is encrypted with the same key before it is published as the release `tvos-<run number>`;
 +# Launcher/tvos/fetch-ipa.sh downloads and decrypts it on your own machine for atvloadly.
 +name: tvOS build
++run-name: tvOS build for ${{ inputs.cpu }}
 +
 +on:
 +  workflow_dispatch:
@@ -885,7 +886,7 @@ index 0000000..1e87db0
 +- **A configure error mentioning `apply-dawn-tvos-gpu-family.cmake`**: the pinned Dawn revision
 +  changed. Update the anchors in that patch to the new source.
 diff --git a/runtime/CMakeLists.txt b/runtime/CMakeLists.txt
-index f0d4fd4..b25e8a0 100644
+index f0d4fd4..aa16262 100644
 --- a/runtime/CMakeLists.txt
 +++ b/runtime/CMakeLists.txt
 @@ -5,8 +5,15 @@ cmake_minimum_required(VERSION 3.25)
@@ -923,7 +924,7 @@ index f0d4fd4..b25e8a0 100644
  elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64|arm64|ARM64)$")
      set(MKW_PLATFORM_MACOS TRUE)
      if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|amd64|x86_64|X86_64)$")
-@@ -39,7 +56,21 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(
+@@ -39,7 +56,25 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(
      set(MKW_PLATFORM_LINUX TRUE)
  else()
      message(FATAL_ERROR
@@ -943,10 +944,14 @@ index f0d4fd4..b25e8a0 100644
 +        "How to provide SDL3: auto, vendor (build from source), system (find_package/imported), or package (download prebuilt)")
 +    set(MKW_TVOS_BUNDLE_IDENTIFIER "local.wiicompiled.tvos" CACHE STRING
 +        "CFBundleIdentifier of the tvOS app; must match the provisioning profile used to sign it")
++    # Dawn builds protobuf only for Tint's IR binary format (a fuzzing/debugging aid the
++    # renderer never uses). Cross-compiled, protobuf also needs a host protoc, so leave it out.
++    set(DAWN_BUILD_PROTOBUF OFF CACHE BOOL "" FORCE)
++    set(TINT_BUILD_IR_BINARY OFF CACHE BOOL "" FORCE)
  endif()
  
  if(MKW_PLATFORM_WINDOWS)
-@@ -236,7 +267,7 @@ else()
+@@ -236,7 +271,7 @@ else()
          set(DAWN_ENABLE_VULKAN ON CACHE BOOL "" FORCE)
          set(DAWN_ENABLE_METAL OFF CACHE BOOL "" FORCE)
          set(TINT_BUILD_HLSL_WRITER ON CACHE BOOL "" FORCE)
@@ -955,7 +960,7 @@ index f0d4fd4..b25e8a0 100644
          set(DAWN_ENABLE_D3D12 OFF CACHE BOOL "" FORCE)
          set(DAWN_ENABLE_VULKAN OFF CACHE BOOL "" FORCE)
          set(DAWN_ENABLE_METAL ON CACHE BOOL "" FORCE)
-@@ -344,7 +375,25 @@ endif()
+@@ -344,7 +379,25 @@ endif()
  # a registration file is silently never compiled and never errors. The stale-glob
  # failure mode is worth far more than the milliseconds.
  file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
@@ -982,7 +987,7 @@ index f0d4fd4..b25e8a0 100644
      list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory.cpp")
      if(MKW_PLATFORM_MACOS_ARM64)
          # HostContext's Apple Silicon backend is implemented in a small assembly
-@@ -357,6 +406,10 @@ if(MKW_PLATFORM_MACOS)
+@@ -357,6 +410,10 @@ if(MKW_PLATFORM_MACOS)
  else()
      list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_LIST_DIR}/src/guest_flat_memory_macos.cpp")
  endif()
@@ -993,7 +998,7 @@ index f0d4fd4..b25e8a0 100644
  set(MKW_PLATFORM_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/platform/host_platform.cpp")
  set(MKW_BASE_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/base_product.cpp")
  set(MKW_RETRO_REWIND_PRODUCT_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/product/retro_rewind_product.cpp")
-@@ -367,7 +420,11 @@ set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp
+@@ -367,7 +424,11 @@ set(MKW_CPU_BASELINE_SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/host_cpu_baseline.cpp
  list(REMOVE_ITEM SOURCES ${MKW_BASE_PRODUCT_SOURCE} ${MKW_RETRO_REWIND_PRODUCT_SOURCE}
       ${MKW_CPU_BASELINE_SOURCE} ${MKW_PLATFORM_SOURCE})
  
