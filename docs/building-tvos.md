@@ -212,7 +212,11 @@ builds. The tvOS-specific pieces:
 - **Graphics.** aurora's Metal path runs unchanged. Dawn and SDL3 are built from aurora's pinned
   sources. A small patch (`aurora-main/cmake/patches/apply-dawn-tvos-gpu-family.cmake`) makes Dawn
   query the GPU family on tvOS: the A8 is Metal family Apple2 and lacks base-vertex/base-instance
-  draws and sampler compare functions, which Dawn otherwise assumes every Apple TV has.
+  draws and sampler compare functions, which Dawn otherwise assumes every Apple TV has. Release
+  builds skip Dawn's validation, so a second patch
+  (`aurora-main/cmake/patches/apply-imgui-wgpu-no-base-vertex.cmake`) stops ImGui's WebGPU renderer
+  from drawing with a base vertex: it binds each overlay window's vertices at an offset instead. Without
+  it, Metal raises `APINotSupported` on the A8 as soon as a second overlay window appears.
 - **Audio.** Music ducking uses `AVAudioSession.secondaryAudioShouldBeSilencedHint`
   (`external_audio_tvos.mm`) instead of macOS Core Audio process objects.
 - **Paths.** User data lives in `Library/Caches` (`runtime/src/platform/host_platform.cpp`), and the

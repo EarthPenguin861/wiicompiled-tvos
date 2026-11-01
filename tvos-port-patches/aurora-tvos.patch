@@ -27,6 +27,32 @@ index 3a57584..69fc435 100644
        EXCLUDE_FROM_ALL
      )
      FetchContent_MakeAvailable(dawn)
+diff --git a/cmake/AuroraDearImguiProvider.cmake b/cmake/AuroraDearImguiProvider.cmake
+index 994196d..fa9987f 100644
+--- a/cmake/AuroraDearImguiProvider.cmake
++++ b/cmake/AuroraDearImguiProvider.cmake
+@@ -1,9 +1,21 @@
+ if (NOT TARGET imgui)
+     message(STATUS "aurora: Fetching imgui")
++    # The Apple TV HD's GPU cannot draw with a base vertex; see the patch script.
++    set(_aurora_imgui_patch_args "")
++    if (CMAKE_SYSTEM_NAME STREQUAL "tvOS")
++        set(_aurora_imgui_tvos_patches "${CMAKE_CURRENT_LIST_DIR}/patches/apply-imgui-wgpu-no-base-vertex.cmake")
++        include("${_aurora_imgui_tvos_patches}")
++        if (DEFINED FETCHCONTENT_SOURCE_DIR_IMGUI AND EXISTS "${FETCHCONTENT_SOURCE_DIR_IMGUI}")
++            aurora_imgui_apply_tvos_patches("${FETCHCONTENT_SOURCE_DIR_IMGUI}")
++        endif ()
++        set(_aurora_imgui_patch_args
++                PATCH_COMMAND ${CMAKE_COMMAND} -DIMGUI_SOURCE_DIR=<SOURCE_DIR> -P "${_aurora_imgui_tvos_patches}")
++    endif ()
+     FetchContent_Declare(imgui
+             URL https://github.com/ocornut/imgui/archive/refs/tags/v1.91.9b-docking.tar.gz
+             URL_HASH SHA256=466fdef9b18de15f0bb6e288e3d00ffa3d82200ec458ce5e4f724a161d9528a5
+             DOWNLOAD_EXTRACT_TIMESTAMP FALSE
++            ${_aurora_imgui_patch_args}
+             EXCLUDE_FROM_ALL
+     )
+     FetchContent_MakeAvailable(imgui)
 diff --git a/cmake/aurora_core.cmake b/cmake/aurora_core.cmake
 index 0a5178a..d3cdd26 100644
 --- a/cmake/aurora_core.cmake
@@ -139,6 +165,73 @@ index 0000000..3887d63
 +# Script mode (FetchContent PATCH_COMMAND).
 +if (CMAKE_SCRIPT_MODE_FILE AND DEFINED DAWN_SOURCE_DIR)
 +  aurora_dawn_apply_tvos_patches("${DAWN_SOURCE_DIR}")
++endif ()
+diff --git a/cmake/patches/apply-imgui-wgpu-no-base-vertex.cmake b/cmake/patches/apply-imgui-wgpu-no-base-vertex.cmake
+new file mode 100644
+index 0000000..29dbd30
+--- /dev/null
++++ b/cmake/patches/apply-imgui-wgpu-no-base-vertex.cmake
+@@ -0,0 +1,61 @@
++# Source-level fix applied to the fetched Dear ImGui tree for tvOS builds.
++#
++# imgui_impl_wgpu merges every ImDrawList into one vertex buffer and draws each
++# command with wgpuRenderPassEncoderDrawIndexed(..., baseVertex = global offset).
++# Dawn's Metal backend turns a non-zero base vertex into
++# -drawIndexedPrimitives:...baseVertex:baseInstance:, which needs Metal GPU
++# family Apple3 (A9 and later). The Apple TV HD's A8 is Apple2: Metal raises an
++# "APINotSupported" Objective-C exception as soon as ImGui draws a second window
++# (a toast, the settings bar), which ends the process. Aurora's release builds
++# enable Dawn's skip_validation, so Dawn's own DisableBaseVertex check never runs.
++#
++# The replacement binds the vertex buffer at the draw's byte offset instead and
++# draws with base vertex 0, which every Metal GPU supports. sizeof(ImDrawVert)
++# is 20, so the offset keeps WebGPU's 4-byte vertex-buffer alignment.
++#
++# The replacement is exact, checked and idempotent: an already-patched tree is
++# left alone; a tree where the anchor is missing (a different ImGui revision)
++# stops the configure instead of silently building without the fix.
++#
++# Used two ways:
++#   - included by AuroraDearImguiProvider.cmake, which calls
++#     aurora_imgui_apply_tvos_patches() on a pre-provided FETCHCONTENT_SOURCE_DIR_IMGUI;
++#   - run as `cmake -DIMGUI_SOURCE_DIR=<dir> -P apply-imgui-wgpu-no-base-vertex.cmake`
++#     from the FetchContent PATCH_COMMAND for a freshly extracted tarball.
++
++function(aurora_imgui_apply_tvos_patches imgui_source_dir)
++  set(_file "${imgui_source_dir}/backends/imgui_impl_wgpu.cpp")
++  if (NOT EXISTS "${_file}")
++    message(FATAL_ERROR "aurora: ImGui source tree at ${imgui_source_dir} has no backends/imgui_impl_wgpu.cpp")
++  endif ()
++
++  set(_old
++[==[                wgpuRenderPassEncoderDrawIndexed(pass_encoder, pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, pcmd->VtxOffset + global_vtx_offset, 0);
++]==])
++  set(_new
++[==[                // aurora tvOS patch: no base-vertex draws (Metal GPU family Apple2, A8).
++                // Bind the vertex buffer at this command's first vertex instead.
++                const uint64_t aurora_vtx_byte_offset = (uint64_t)(pcmd->VtxOffset + global_vtx_offset) * sizeof(ImDrawVert);
++                wgpuRenderPassEncoderSetVertexBuffer(pass_encoder, 0, fr->VertexBuffer, aurora_vtx_byte_offset, (uint64_t)fr->VertexBufferSize * sizeof(ImDrawVert) - aurora_vtx_byte_offset);
++                wgpuRenderPassEncoderDrawIndexed(pass_encoder, pcmd->ElemCount, 1, pcmd->IdxOffset + global_idx_offset, 0, 0);
++]==])
++
++  file(READ "${_file}" _content)
++  string(FIND "${_content}" "aurora tvOS patch: no base-vertex draws" _already)
++  if (NOT _already EQUAL -1)
++    return()
++  endif ()
++  string(FIND "${_content}" "${_old}" _anchor)
++  if (_anchor EQUAL -1)
++    message(FATAL_ERROR "aurora: ImGui tvOS patch 'no base-vertex draws' does not apply to ${_file}; "
++      "the ImGui revision changed, review cmake/patches/apply-imgui-wgpu-no-base-vertex.cmake")
++  endif ()
++  string(REPLACE "${_old}" "${_new}" _content "${_content}")
++  file(WRITE "${_file}" "${_content}")
++  message(STATUS "aurora: ImGui tvOS patch applied: no base-vertex draws")
++endfunction()
++
++# Script mode (FetchContent PATCH_COMMAND).
++if (CMAKE_SCRIPT_MODE_FILE AND DEFINED IMGUI_SOURCE_DIR)
++  aurora_imgui_apply_tvos_patches("${IMGUI_SOURCE_DIR}")
 +endif ()
 diff --git a/lib/system_info.cpp b/lib/system_info.cpp
 index 0361263..82500b5 100644
