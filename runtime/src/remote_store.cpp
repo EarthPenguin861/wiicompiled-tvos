@@ -43,11 +43,14 @@ namespace fs = std::filesystem;
 namespace RemoteStore {
 namespace {
 
-// Disc reads are served from 1 MiB pieces of the server's files. Up to 24 of them stay in memory,
-// and each read asks for the next few in the background so sequential readers find them ready.
-constexpr uint64_t kChunkBytes = 1u << 20;
-constexpr size_t kMaxCachedChunks = 24;
-constexpr uint64_t kReadAheadChunks = 3;
+// Disc reads are served from 512 KiB pieces of the server's files. Up to 64 of them (32 MiB) stay
+// in memory, and each read asks two background threads for the next 4 MiB so sequential readers
+// (movies, streamed music) find it ready. Smaller pieces keep the wait short when a read does
+// miss.
+constexpr uint64_t kChunkBytes = 512u << 10;
+constexpr size_t kMaxCachedChunks = 64;
+constexpr uint64_t kReadAheadChunks = 8;
+constexpr int kPrefetchThreads = 2;
 constexpr int kConnectTimeoutMs = 3000;
 constexpr int kDataTimeoutMs = 10000;
 constexpr int kManifestTimeoutMs = 8000;
@@ -422,16 +425,24 @@ void QueueReadAhead(const std::string& path, uint64_t afterIndex, uint64_t fileS
     std::lock_guard lock(g_mutex);
     if (!g_prefetcherStarted) {
         g_prefetcherStarted = true;
-        std::thread(PrefetchLoop).detach();
+        for (int i = 0; i < kPrefetchThreads; ++i) {
+            std::thread(PrefetchLoop).detach();
+        }
     }
+    // The newest read decides what is needed next: queue its pieces nearest first, ahead of
+    // anything left over from earlier reads, and drop the oldest leftovers.
+    std::deque<std::pair<std::string, uint64_t>> wanted;
     for (uint64_t i = 1; i <= kReadAheadChunks; ++i) {
         const uint64_t index = afterIndex + i;
         if (index * kChunkBytes >= fileSize) break;
         if (g_chunks.count(ChunkKey(path, index)) != 0) continue;
-        if (std::find(g_prefetch.begin(), g_prefetch.end(), std::make_pair(path, index)) != g_prefetch.end()) continue;
-        g_prefetch.emplace_back(path, index);
+        wanted.emplace_back(path, index);
     }
-    while (g_prefetch.size() > 8) g_prefetch.pop_front();
+    for (auto& job : g_prefetch) {
+        if (std::find(wanted.begin(), wanted.end(), job) == wanted.end()) wanted.push_back(std::move(job));
+    }
+    while (wanted.size() > 2 * kReadAheadChunks) wanted.pop_back();
+    g_prefetch = std::move(wanted);
     g_changed.notify_all();
 }
 

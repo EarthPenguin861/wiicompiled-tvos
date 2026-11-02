@@ -260,7 +260,7 @@ saves, which frees most of the 2.6 GB the game data takes and protects saves fro
    `DATA/sys` and the small folders: the game needs `sys/` before it can reach the server.
 
 At start-up the game merges the server's file list into the disc index; files still on the device
-are used first. Reads go through a 24 MiB in-memory cache with read-ahead. If the server cannot be
+are used first. Reads go through a 32 MiB in-memory cache that reads 4 MiB ahead. If the server cannot be
 reached, the game keeps retrying a read for about half a minute and then reports a disc read error,
 so the server must be running while you play.
 
