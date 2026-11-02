@@ -6,6 +6,8 @@
 #include <dolphin/gx/GXAurora.h>
 
 #include <algorithm>
+#include <cstring>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -151,29 +153,53 @@ extern "C" void GX__CopyDisp_8016fc38(uint32_t da, uint32_t c) {
 PPC_NATIVE_OVERRIDE_VOID(8016fc38, GX__CopyDisp_8016fc38, (uint32_t da, uint32_t c), (da, c));
 
 
+namespace {
+// MKW_GX_DEFER_COPYTEX=0 restores the inline copy (a full worker sync per copy) for comparison.
+bool DeferTexCopies() {
+    static const bool defer = [] {
+        const char* value = std::getenv("MKW_GX_DEFER_COPYTEX");
+        return value == nullptr || std::strcmp(value, "0") != 0;
+    }();
+    return defer;
+}
+} // namespace
+
 extern "C" void GX__CopyTex_8016fd74(uint32_t da, uint32_t c) {
-    // Begin the frame before going inline so a deferred begin reaches the worker first.
+    // Begin the frame before recording or going inline so a deferred begin reaches the worker first.
     EnsureAuroraFrameActive();
-    GX_SYNC_INLINE();
-    // Match GX FIFO ordering: texture copies observe all prior draws.
-    GXDrawDone();
+    // g_texCopyState is the game thread's record of GXSetTexCopySrc/Dst (set when they are
+    // called), so the copy's source and size are known here without the worker.
     const uint16_t rawSrcLeft = g_texCopyState.srcLeft;
     const uint16_t rawSrcTop = g_texCopyState.srcTop;
     const uint16_t rawSrcWidth = g_texCopyState.srcWidth;
     const uint16_t rawSrcHeight = g_texCopyState.srcHeight;
-
-    // Keep the source in guest EFB coordinates. Aurora maps it to the scaled
-    // EFB exactly once, matching Dolphin's ConvertEFBRectangle path.
-    GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
-    // EFB copies stay GPU-only except probe-sized ones (e.g. the 4x4 lens-flare depth probe),
-    // which Aurora reads back asynchronously via efb_ram::schedule and land in guest RAM a frame
-    // later. RISK: copies above the probe threshold, or on the offscreen list, are not
-    // auto-downloaded, so guest reads see stale RAM; call aurora_flush_efb_copies_to_ram if a
-    // copy needs reading back.
-    GXCopyTex(GuestToHostPtr(da), (GXBool)c);
-    RememberEfbCopyDestination(
-        da, GXGetTexBufferSize(g_texCopyState.dstWidth, g_texCopyState.dstHeight,
-                               g_texCopyState.dstFormat, GX_FALSE, 0));
-    GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
+    const uint32_t copySize = GXGetTexBufferSize(g_texCopyState.dstWidth, g_texCopyState.dstHeight,
+                                                 g_texCopyState.dstFormat, GX_FALSE, 0);
+    const auto copy = [=] {
+        // Match GX FIFO ordering: texture copies observe all prior draws.
+        GXDrawDone();
+        // Keep the source in guest EFB coordinates. Aurora maps it to the scaled
+        // EFB exactly once, matching Dolphin's ConvertEFBRectangle path.
+        GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
+        // EFB copies stay GPU-only except probe-sized ones (e.g. the 4x4 lens-flare depth probe),
+        // which Aurora reads back asynchronously via efb_ram::schedule and land in guest RAM a frame
+        // later. RISK: copies above the probe threshold, or on the offscreen list, are not
+        // auto-downloaded, so guest reads see stale RAM; call aurora_flush_efb_copies_to_ram if a
+        // copy needs reading back.
+        GXCopyTex(GuestToHostPtr(da), (GXBool)c);
+        // Registered where the copy executes: retiring a destination (MarkTexObjsDirtyForRange)
+        // also runs in recorded order, so a later flush of the range still retires this copy.
+        RememberEfbCopyDestination(da, copySize);
+        GXSetTexCopySrc(rawSrcLeft, rawSrcTop, rawSrcWidth, rawSrcHeight);
+    };
+    // Like GXCopyDisp, the copy is GX work in stream order and gives the guest nothing back, so it
+    // is recorded for the worker. Running it inline drained the whole worker queue for every copy
+    // (bloom, lens flare and light textures make several per race frame).
+    if (GxWorker::ShouldDefer() && DeferTexCopies()) {
+        GxWorker::Submit(copy);
+        return;
+    }
+    GX_SYNC_INLINE();
+    copy();
 }
 PPC_NATIVE_OVERRIDE_VOID(8016fd74, GX__CopyTex_8016fd74, (uint32_t da, uint32_t c), (da, c));
