@@ -46,8 +46,8 @@ constexpr int kSwipeGapReads = 1;
 
 struct Settings {
     bool enabled = true;
-    float lockDegrees = 40.0f;
-    float deadzoneDegrees = 4.0f;
+    float lockDegrees = 60.0f;
+    float deadzoneDegrees = 6.0f;
     float shakeG = 1.3f;
     bool invert = false;
 };
@@ -72,8 +72,8 @@ const Settings& GetSettings() {
     static const Settings settings = [] {
         Settings s;
         s.enabled = EnvFlag("MKW_SIRI_REMOTE", true);
-        s.lockDegrees = EnvFloat("MKW_SIRI_REMOTE_LOCK", 40.0f, 10.0f, 90.0f);
-        s.deadzoneDegrees = EnvFloat("MKW_SIRI_REMOTE_DEADZONE", 4.0f, 0.0f, 30.0f);
+        s.lockDegrees = EnvFloat("MKW_SIRI_REMOTE_LOCK", 60.0f, 10.0f, 120.0f);
+        s.deadzoneDegrees = EnvFloat("MKW_SIRI_REMOTE_DEADZONE", 6.0f, 0.0f, 30.0f);
         s.shakeG = EnvFloat("MKW_SIRI_REMOTE_SHAKE", 1.3f, 0.3f, 5.0f);
         s.invert = EnvFlag("MKW_SIRI_REMOTE_INVERT", false);
         return s;
@@ -113,6 +113,7 @@ struct State {
     bool menuConsumed = false;    // the Menu press that paused is held; it must not also go back
     bool loggedGrab = false;
     float aimBase = 0.0f;         // gravity along the face normal when the wheel was taken
+    float grabSide = 1.0f;        // which way round it was held when the wheel was taken
     int diagnosticsLeft = 200;
     Clock::time_point nextDiagnostic{};
     Clock::time_point trickUntil{};
@@ -134,11 +135,12 @@ float Side(const Sample& sample) noexcept {
 }
 
 // Steering angle in degrees, positive when the remote is turned clockwise (seen from the player),
-// with the remote held like a wheel, touch surface at either end: how far the long axis is tilted
-// from level. That does not depend on how far the face is tilted back toward the ceiling.
-float SteeringDegrees(const Sample& sample) noexcept {
-    const float along = std::clamp(Side(sample) * sample.gravity[1], -1.0f, 1.0f);
-    return std::asin(along) * kRadiansToDegrees;
+// with the remote held like a wheel, touch surface at either end: the direction of gravity in the
+// plane of the face, which does not depend on how far the face is tilted back. Measured against
+// the way round the remote was held when it took the wheel, so turning it past vertical keeps
+// steering the same way instead of flipping.
+float SteeringDegrees(const Sample& sample, float side) noexcept {
+    return std::atan2(side * sample.gravity[1], side * sample.gravity[0]) * kRadiansToDegrees;
 }
 
 int8_t StickFromDegrees(float degrees, const Settings& settings) noexcept {
@@ -230,7 +232,7 @@ void ApplyWheel(PADStatus& pad, const Sample& sample, RaceStage stage, const Set
     std::memset(&pad, 0, sizeof(pad));
     pad.err = PAD_ERR_NONE;
 
-    float degrees = SteeringDegrees(sample);
+    float degrees = SteeringDegrees(sample, g_state.grabSide);
     if (settings.invert) {
         degrees = -degrees;
     }
@@ -347,26 +349,40 @@ void Apply(PADStatus* statuses) noexcept {
     g_state.sideways = g_state.sideways
                            ? longAxis < kLeaveLongAxis && shortAxis > kLeaveShortAxis
                            : longAxis < kEnterLongAxis && shortAxis > kEnterShortAxis;
-    if (!g_state.sideways || !inRace) {
+    if (!inRace) {
         g_state.grabbed = false;
         g_state.suspended = false;
     }
 
     PADStatus& pad = statuses[0];
-    const auto pause = [&pad] {
-        // Pause, then hand the remote to the pause menu (menu mode) until it is held upright.
-        // The press stays consumed while held, or its next read would go back out of the menu.
+    const auto pressStart = [&pad](bool paused) {
+        // Start pauses or resumes. The press stays consumed while held, or its next read would
+        // also go back out of the menu.
         std::memset(&pad, 0, sizeof(pad));
         pad.err = PAD_ERR_NONE;
         pad.button = PAD_BUTTON_START;
-        g_state.suspended = true;
+        g_state.suspended = paused;
         g_state.grabbed = false;
         g_state.driving = false;
         g_state.menuConsumed = true;
     };
-    if (inRace && g_state.sideways && !g_state.suspended) {
+    const auto pause = [&pressStart] { pressStart(true); };
+    if (inRace && g_state.suspended) {
+        // The pause menu, in menu mode: Menu resumes, and a click chooses an option, which leaves
+        // the pause menu too. The wheel is taken again with the next click while sideways.
+        if (menuPressed) {
+            pressStart(false);
+            return;
+        }
+        if (clickPressed) {
+            g_state.suspended = false;
+        }
+        ApplyMenuButtons(pad, sample, PAD_BUTTON_B);
+        return;
+    }
+    if (inRace && (g_state.grabbed || g_state.sideways)) {
         // Held like a wheel: a click takes over port 1 (a remote resting on its side never does),
-        // and the remote keeps it until it is held upright or laid flat, or Menu pauses.
+        // and the remote keeps it however far it is turned, until Menu pauses or the race ends.
         if (!g_state.grabbed) {
             if (menuPressed) {
                 pause();
@@ -378,6 +394,7 @@ void Apply(PADStatus* statuses) noexcept {
             g_state.grabbed = true;
             g_state.grabClickHeld = true;
             g_state.aimBase = sample.gravity[2];
+            g_state.grabSide = Side(sample);
             ResetSwipe();
             if (!g_state.loggedGrab) {
                 g_state.loggedGrab = true;
@@ -391,7 +408,7 @@ void Apply(PADStatus* statuses) noexcept {
         }
         return;
     }
-    if (inRace && !g_state.suspended && menuPressed) {
+    if (inRace && menuPressed) {
         pause();
         return;
     }

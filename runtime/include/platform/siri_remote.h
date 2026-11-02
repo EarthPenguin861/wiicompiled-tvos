@@ -19,7 +19,7 @@ class RemoteHost;
 //
 // Wheel mode, during a race: hold the remote sideways like a Wii Remote in a Wii Wheel and click
 // once to take the wheel. It then replaces port 1, even with a controller
-// connected, until it is held upright or laid flat, or Menu pauses:
+// connected, however far it is turned, until Menu pauses or the race ends:
 //   tilt (rotate it like a wheel)   steer
 //   nothing                         accelerate (held automatically once the race has started)
 //   click the touch surface         brake / reverse
@@ -27,12 +27,13 @@ class RemoteHost;
 //                                   throw forward
 //   rest a finger on the surface    hop / drift
 //   shake                           trick off a ramp, or a wheelie on a bike
-//   Menu                            pause; the remote then works the pause menu until it has been
-//                                   held upright once
+//   Menu                            pause; the remote then works the pause menu (Menu resumes,
+//                                   a click chooses), and the next click while sideways takes
+//                                   the wheel again
 // A remote resting on its side never takes over: the wheel needs the click.
 //
 // MKW_SIRI_REMOTE=0 turns it off; MKW_SIRI_REMOTE_LOCK (degrees of tilt for full lock, default
-// 40), MKW_SIRI_REMOTE_DEADZONE (degrees, default 4), MKW_SIRI_REMOTE_SHAKE (g, default 1.3) and
+// 60), MKW_SIRI_REMOTE_DEADZONE (degrees, default 6), MKW_SIRI_REMOTE_SHAKE (g, default 1.3) and
 // MKW_SIRI_REMOTE_INVERT=1 tune it.
 namespace SiriRemote {
 

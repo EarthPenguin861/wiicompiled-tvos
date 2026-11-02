@@ -183,7 +183,8 @@ Things to know:
   - Held sideways, swipes follow the TV (a swipe toward the TV's right is Right).
   - **Races:** hold it sideways like a Wii Remote in a Wii Wheel (face toward you or tilted back)
     and **click once to take the wheel** (a remote lying on its side never takes over). It then drives player
-    1, even with a controller connected, until you hold it upright or lay it flat:
+    1, even with a controller connected, however far you turn it, until you pause or the race
+    ends:
 
     | Remote | In the race |
     | --- | --- |
@@ -195,10 +196,10 @@ Things to know:
     | Shake | Trick off a ramp, or a wheelie on a bike |
     | Menu | Pause |
 
-    After pausing, the remote works the pause menu (swipe, click, Menu = back); hold it upright
-    once, then sideways and click again to drive. After the finish line it is back in menu mode.
+    After pausing, the remote works the pause menu (swipe, click to choose, Menu to resume);
+    hold it sideways and click again to drive. After the finish line it is back in menu mode.
   - `MKW_SIRI_REMOTE=0` in the launch environment turns this off; `MKW_SIRI_REMOTE_LOCK` (degrees
-    of tilt for full lock, default 40), `MKW_SIRI_REMOTE_DEADZONE` (default 4),
+    of tilt for full lock, default 60), `MKW_SIRI_REMOTE_DEADZONE` (default 6),
     `MKW_SIRI_REMOTE_SHAKE` (g, default 1.3) and `MKW_SIRI_REMOTE_INVERT=1` tune it
     (`runtime/src/platform/tvos/siri_remote_wheel_tvos.cpp`).
   - **Wii Remote mode** (experimental): `siri_remote = "wiimote"` under `[controller]` in

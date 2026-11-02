@@ -443,9 +443,12 @@ private:
         const bool inRace = stage >= 0 && stage <= 2;
         if (!inRace) m_suspended = false;
         const bool wasDriving = m_driving;
-        m_driving = inRace && m_sideways && !m_suspended;
+        // Once it is a wheel it stays one for the race, however far it is turned, until Menu
+        // pauses.
+        m_driving = inRace && !m_suspended && (m_driving || m_sideways);
         if (m_driving && !wasDriving) {
             m_aimBase = sample.gravity[2];
+            m_driveSide = Side(sample);
         }
 
         UpdateAccelerometer(sample);
@@ -511,7 +514,7 @@ private:
         float x = force[0];
         float y = -force[1];
         const float z = -force[2];
-        if (m_driving && Side(sample) > 0.0f) {
+        if (m_driving && m_driveSide > 0.0f) {
             // Held sideways the other way round: present it as a Wii Wheel held the usual way.
             x = -x;
             y = -y;
@@ -525,7 +528,7 @@ private:
     }
 
     void UpdatePointer(const Sample& sample, float dt) {
-        m_pointerVisible = !m_sideways;
+        m_pointerVisible = !m_sideways && !m_driving;
         if (!m_pointerVisible) return;
         const float pitch = std::asin(std::clamp(-sample.gravity[1], -1.0f, 1.0f)) * kRadiansToDegrees;
         float x;
@@ -611,6 +614,7 @@ private:
     bool m_driving = false;
     bool m_suspended = false;
     float m_aimBase = 0.0f;
+    float m_driveSide = -1.0f;
 
     bool m_pointerVisible = false;
     float m_pointerX = 0.0f;
