@@ -1441,6 +1441,19 @@ int RuntimeMain(int argc, char** argv) {
         auroraConfig.allowTextureDumps = auroraConfig.allowTextureReplacements &&
                                          RuntimeConfigFile::TextureDumps(false);
         auroraConfig.vsync = RuntimeConfigFile::Vsync();
+#if MKW_HOST_TVOS
+        // The Wii filters a GX_ANISO_4 texture with at most four samples. Aurora's PC default
+        // (16, and 8 for GX_ANISO_2) multiplies the cost of every road and floor texture seen at a
+        // grazing angle, which the Apple TV HD's GPU pays on every frame; use the console's limit.
+        auroraConfig.maxTextureAnisotropy = 4;
+#endif
+        // MKW_MAX_ANISOTROPY=1..16 overrides the limit (for measuring its cost).
+        if (const char* anisotropy = std::getenv("MKW_MAX_ANISOTROPY")) {
+            const long value = std::strtol(anisotropy, nullptr, 10);
+            if (value >= 1 && value <= 16) {
+                auroraConfig.maxTextureAnisotropy = static_cast<uint16_t>(value);
+            }
+        }
         auroraConfig.desiredBackend = BACKEND_AUTO;
         const float resolutionMultiplier = RuntimeConfigFile::ResolutionMultiplier(1.0f);
         ConfigureMkwDynamicAspect(configWidescreen, forceAspect,
