@@ -11,6 +11,8 @@ extern "C" void GxNotifyGuestRamDmaWrite(uint32_t addr, uint32_t size);
 #include "hle/storage/riivolution.h"
 #include "ppc_runtime.h"
 #include "recomp_mod_loader.h"
+#include "nand_path.h"
+#include "remote_store.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "runtime_product.h"
@@ -245,6 +247,20 @@ static int32_t DvdReadFatal(uint32_t fileInfoPtr,
     } catch (const Memory::AccessViolation&) {
     }
     return kDvdFatalError;
+}
+
+// Reads a disc file range from this device, or from the game server for files indexed there.
+static bool ReadHostRange(const fs::path& hostPath, uint64_t offset, uint32_t length,
+                          std::vector<uint8_t>& destination, std::string& reason) {
+    if (RemoteStore::IsRemoteHostPath(hostPath)) {
+        return RemoteStore::ReadDiscRange(hostPath, offset, length, destination, reason);
+    }
+    DvdReadContract::HostReadFailure failure;
+    if (DvdReadContract::ReadExact(hostPath, offset, length, destination, failure)) {
+        return true;
+    }
+    reason = DvdReadContract::Describe(failure);
+    return false;
 }
 
 static void LoadFstIndex() {
@@ -786,6 +802,44 @@ static void CompleteDvdCancelState()
     Memory::Write32(MKW_GADDR(803866F0), 0); // executing command block
 }
 
+static std::string DiscGameCodeText() {
+    const uint32_t code = CurrentDiscGameCode();
+    const char text[5] = {static_cast<char>(code >> 24), static_cast<char>(code >> 16),
+                          static_cast<char>(code >> 8), static_cast<char>(code), '\0'};
+    return text;
+}
+
+// Disc files this device does not keep are read from the game server ([remote] url), if one is
+// configured. Files present here win, so a partial local copy still works.
+static void RegisterRemoteDiscFiles() {
+    if (!RemoteStore::Enabled()) {
+        return;
+    }
+    std::vector<RemoteStore::ManifestEntry> entries;
+    std::string error;
+    if (!RemoteStore::FetchManifest(DiscGameCodeText(), entries, error)) {
+        RT_LOG(RT_TAG_DVD) << "WARNING: game server " << RemoteStore::ServerText()
+                           << " is unavailable (" << error
+                           << "); only the disc files on this device can be read" << std::endl;
+        return;
+    }
+    size_t added = 0;
+    uint64_t bytes = 0;
+    for (const RemoteStore::ManifestEntry& entry : entries) {
+        const std::string dvdPath = "/" + entry.path;
+        if (DvdEntryExists(dvdPath)) {
+            continue;
+        }
+        RegisterFileEntry(dvdPath, RemoteStore::MakeRemoteHostPath(entry.path),
+                          static_cast<uint32_t>(entry.size));
+        ++added;
+        bytes += entry.size;
+    }
+    RT_LOG(RT_TAG_DVD) << "game server " << RemoteStore::ServerText() << ": " << added
+                       << " disc file(s), " << (bytes >> 20) << " MiB, read over the network"
+                       << std::endl;
+}
+
 // 0x8015EA1C -> DVDInit
 extern "C" void DVDInit_8015EA1C()
 {
@@ -826,6 +880,10 @@ extern "C" void DVDInit_8015EA1C()
     
     // Map "<dvd_root>/files" -> "/"
     ScanDirectory(rootPath / "files", "/");
+    RegisterRemoteDiscFiles();
+    // Bring back saves tvOS deleted with the Caches folder before the game looks for them, and
+    // keep the game server's copy current from here on.
+    RemoteStore::StartSaveSync(RuntimeNandPath::DiscoverNandRootPath(), DiscGameCodeText());
 
     // Map "<dvd_root>/sys" -> "/sys/" (e.g. main.dol, bi2.bin)
     ScanDirectory(rootPath / "sys", "/sys/");
@@ -918,10 +976,10 @@ extern "C" int32_t DVDReadPrio_8015E834(uint32_t fileInfoPtr, uint32_t bufferPtr
     }
 
     std::vector<uint8_t> tempBuf;
-    DvdReadContract::HostReadFailure failure;
-    if (!DvdReadContract::ReadExact(entry.hostPath, uOffset, uLength, tempBuf, failure)) {
+    std::string readError;
+    if (!ReadHostRange(entry.hostPath, uOffset, uLength, tempBuf, readError)) {
         return DvdReadFatal(fileInfoPtr, HostPathText(entry.hostPath), offset, uLength,
-                            DvdReadContract::Describe(failure));
+                            readError.c_str());
     }
 
     CopyToGuestAsDma(bufferPtr, tempBuf.data(), uLength);
@@ -985,15 +1043,15 @@ extern "C" int32_t DVD__ReadAbsAsyncPrio_HLE_801628cc(uint32_t cmdBlockPtr,
                                      "DVD read destination is outside guest memory");
         } else {
             std::vector<uint8_t> tempBuf;
-            DvdReadContract::HostReadFailure failure;
-            if (!DvdReadContract::ReadExact(readInfo.entry->hostPath,
-                                            readInfo.fileOffset,
-                                            readInfo.readLength,
-                                            tempBuf,
-                                            failure)) {
+            std::string readError;
+            if (!ReadHostRange(readInfo.entry->hostPath,
+                               readInfo.fileOffset,
+                               readInfo.readLength,
+                               tempBuf,
+                               readError)) {
                 bytesRead = DvdReadFatal(cmdBlockPtr, HostPathText(readInfo.entry->hostPath),
                                          readInfo.fileOffset, readInfo.readLength,
-                                         DvdReadContract::Describe(failure));
+                                         readError.c_str());
             } else {
                 CopyToGuestAsDma(bufferPtr, tempBuf.data(), tempBuf.size());
                 bytesRead = static_cast<int32_t>(tempBuf.size());

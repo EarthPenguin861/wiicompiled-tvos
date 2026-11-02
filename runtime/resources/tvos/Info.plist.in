@@ -63,5 +63,8 @@
 	-->
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Bluetooth is used only to talk to game controllers.</string>
+	<!-- [remote] url: game files and save copies on a server in the home network. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Game files and save backups can be kept on a computer in your home network.</string>
 </dict>
 </plist>

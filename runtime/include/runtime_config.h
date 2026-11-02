@@ -74,6 +74,10 @@ struct RuntimeUserConfig {
     // Apple TV: what the first-generation Siri Remote is to the game, "gamecube" (buttons and a
     // tilt wheel on GameCube port 1) or "wiimote" (a virtual Wii Remote with a tilt pointer).
     std::optional<std::string> siriRemote;
+    // [remote] url and token: a game server on the local network that holds disc files the
+    // device does not keep and a copy of the saves (see remote_store.h).
+    std::optional<std::string> remoteUrl;
+    std::optional<std::string> remoteToken;
     // Outside a Steam launch, ask a running Steam client for a game controller layout while
     // the window has focus instead of its desktop one (buttons bound to mouse and keyboard).
     std::optional<bool> steamInputOverride;
@@ -501,6 +505,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     }
     config.wiiRumble = FindConfigValue<bool>(document, "controller", "wii_rumble");
     config.siriRemote = FindConfigValue<std::string>(document, "controller", "siri_remote");
+    config.remoteUrl = FindConfigValue<std::string>(document, "remote", "url");
+    config.remoteToken = FindConfigValue<std::string>(document, "remote", "token");
     config.steamInputOverride = FindConfigValue<bool>(document, "controller", "steam_input_override");
     if (const auto value = FindConfigUint(document, "controller", "steam_input_app_id"); value && *value != 0) {
         config.steamInputAppId = *value;
@@ -902,6 +908,16 @@ inline bool AttenuateMusicWhenMediaPlays(bool fallback = false) {
 // Apple TV: "gamecube" or "wiimote" (see RuntimeUserConfig::siriRemote); empty when not set.
 inline std::string SiriRemoteMode(std::string fallback = "") {
     return Get().siriRemote.value_or(std::move(fallback));
+}
+
+// [remote] url ("http://host:port") of the local game server; empty when there is none.
+inline std::string RemoteUrl() {
+    return Get().remoteUrl.value_or("");
+}
+
+// [remote] token: the shared secret the game server expects in X-Wii-Token.
+inline std::string RemoteToken() {
+    return Get().remoteToken.value_or("");
 }
 
 // Bluetooth Wii Remotes. Read once before SDL's joystick subsystem comes up, so a

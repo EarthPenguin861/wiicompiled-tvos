@@ -384,6 +384,8 @@ endif()
 # a registration file is silently never compiled and never errors. The stale-glob
 # failure mode is worth far more than the milliseconds.
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+# Socket code with file-local helpers; keep it out of unity batches.
+set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/src/remote_store.cpp" PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
 if(MKW_PLATFORM_TVOS)
     # src/platform/tvos/ replaces the host services tvOS cannot provide: the
     # 4 GiB flat guest view (guest_flat_memory_tvos.cpp), Core Audio process
