@@ -106,7 +106,9 @@ struct State {
     bool sideways = false;        // held sideways (with hysteresis)
     bool grabbed = false;         // a click while sideways in a race handed it the wheel
     bool grabClickHeld = false;   // the grabbing click has not been released yet
-    bool driving = false;         // it drives port 1 on this read
+    bool driving = false;         // it drives its port on this read
+    int port = 0;                 // its GameCube port: 0 (port 1) unless a controller is there
+    int loggedPort = -1;
     bool suspended = false;       // Menu paused the race; released when it is held upright
     bool previousMenu = false;
     bool previousClick = false;
@@ -200,7 +202,18 @@ uint16_t SwipeButtons(Sample sample) noexcept {
     return 0;
 }
 
-// Menu mode: the remote's presses are added to port 1, beside whatever controller is there.
+// The remote is a player of its own: port 1 when no controller is connected, otherwise the first
+// port no controller uses, so a controller and the remote play as two players.
+int FreePort(const PADStatus* statuses) noexcept {
+    for (int i = 0; i < PAD_CHANMAX; ++i) {
+        if (statuses[i].err != PAD_ERR_NONE) {
+            return i;
+        }
+    }
+    return 0; // every port has a controller: share port 1
+}
+
+// Menu mode: the remote's presses are added to its port.
 // `menuButton` is B (back) in menus and the pause menu, Start (pause) during a race.
 void ApplyMenuButtons(PADStatus& pad, const Sample& sample, uint16_t menuButton) noexcept {
     uint16_t buttons = SwipeButtons(sample);
@@ -217,8 +230,8 @@ void ApplyMenuButtons(PADStatus& pad, const Sample& sample, uint16_t menuButton)
     pad.button |= buttons;
 }
 
-// While a remote is connected, port 1 always reads as a connected controller. With nothing else
-// there it would otherwise read as unplugged between presses, and the game stops for
+// While a remote is connected, its port always reads as a connected controller. It would otherwise
+// read as unplugged between presses, and the game stops for
 // "communication interrupted" every time the port drops out.
 void KeepConnected(PADStatus& pad) noexcept {
     if (pad.err != PAD_ERR_NONE) {
@@ -227,7 +240,7 @@ void KeepConnected(PADStatus& pad) noexcept {
     }
 }
 
-// Wheel mode: the remote replaces port 1.
+// Wheel mode: the remote replaces whatever its port read.
 void ApplyWheel(PADStatus& pad, const Sample& sample, RaceStage stage, const Settings& settings) noexcept {
     std::memset(&pad, 0, sizeof(pad));
     pad.err = PAD_ERR_NONE;
@@ -331,7 +344,18 @@ void Apply(PADStatus* statuses) noexcept {
         g_state.menuConsumed = false;
     }
     if (sample.remote) {
-        KeepConnected(statuses[0]);
+        // The port is chosen outside races only, so a controller connected mid-race never moves
+        // the remote to another player.
+        const RaceStage stageNow = CurrentRaceStage();
+        if (stageNow != RaceStage::Starting && stageNow != RaceStage::Racing) {
+            g_state.port = FreePort(statuses);
+        }
+        if (g_state.port != g_state.loggedPort) {
+            g_state.loggedPort = g_state.port;
+            RT_LOGF("siri-remote", "the Siri Remote is player %d (GameCube port %d)\n", g_state.port + 1,
+                    g_state.port + 1);
+        }
+        KeepConnected(statuses[g_state.port]);
     }
     // The settings bar, a prompt or the startup screen own the input while they are open.
     if (!sample.remote || InputBindings::InputBlocked()) {
@@ -354,7 +378,7 @@ void Apply(PADStatus* statuses) noexcept {
         g_state.suspended = false;
     }
 
-    PADStatus& pad = statuses[0];
+    PADStatus& pad = statuses[g_state.port];
     const auto pressStart = [&pad](bool paused) {
         // Start pauses or resumes. The press stays consumed while held, or its next read would
         // also go back out of the menu.
@@ -381,7 +405,7 @@ void Apply(PADStatus* statuses) noexcept {
         return;
     }
     if (inRace && (g_state.grabbed || g_state.sideways)) {
-        // Held like a wheel: a click takes over port 1 (a remote resting on its side never does),
+        // Held like a wheel: a click takes over its port (a remote resting on its side never does),
         // and the remote keeps it however far it is turned, until Menu pauses or the race ends.
         if (!g_state.grabbed) {
             if (menuPressed) {

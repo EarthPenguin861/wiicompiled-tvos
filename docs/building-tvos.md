@@ -175,16 +175,16 @@ Things to know:
 - **Siri Remote Menu** during play opens the exit prompt (the desktop's Escape), except with a
   first-generation remote (below), where Menu is the game's Back. The **TV** button returns to
   the Home screen as usual.
-- The Siri Remote never takes a player slot. Its arrows and Select reach the settings bar.
+- Later Siri Remotes never take a player slot. Their arrows and Select reach the settings bar.
 - **First-generation Siri Remote** (the black one with a glass touch surface, which has motion
-  sensors; later remotes have none) also plays the game:
-  - **Menus:** swipe to move (one step per swipe), click to select (A), Menu to go back (B). These
-    presses are added to player 1, so a connected controller keeps working beside it.
+  sensors; later remotes have none) also plays the game, as a player of its own: player 1 when no
+  controller is connected, otherwise the next free player (with one controller it is player 2), so
+  a controller and the remote can race each other. Its player is only chosen outside races.
+  - **Menus:** swipe to move (one step per swipe), click to select (A), Menu to go back (B).
   - Held sideways, swipes follow the TV (a swipe toward the TV's right is Right).
   - **Races:** hold it sideways like a Wii Remote in a Wii Wheel (face toward you or tilted back)
-    and **click once to take the wheel** (a remote lying on its side never takes over). It then drives player
-    1, even with a controller connected, however far you turn it, until you pause or the race
-    ends:
+    and **click once to take the wheel** (a remote lying on its side never takes over). It then
+    drives its player however far you turn it, until you pause or the race ends:
 
     | Remote | In the race |
     | --- | --- |

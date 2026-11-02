@@ -10,16 +10,19 @@ class RemoteHost;
 
 // The first-generation Siri Remote (the one with motion sensors) in the game on Apple TV.
 //
-// Menu mode (everywhere the remote is not driving): its presses are added to GameCube port 1,
-// beside any controller there: swipe = D-pad (one step per swipe), click = A, Menu = B (back), or
-// Start (pause) during a race. Play/Pause keeps opening the settings bar.
+// The remote is a player of its own: GameCube port 1 when no controller is connected, otherwise
+// the first port no controller uses (a controller on port 1 makes the remote player 2). The port
+// is only chosen outside races.
+//
+// Menu mode (everywhere the remote is not driving): swipe = D-pad (one step per swipe), click = A,
+// Menu = B (back), or Start (pause) during a race. Play/Pause keeps opening the settings bar.
 //
 // Held sideways (touch surface at the left or right end, face toward you or tilted back), swipes
 // follow the TV: a swipe to the right is Right.
 //
 // Wheel mode, during a race: hold the remote sideways like a Wii Remote in a Wii Wheel and click
-// once to take the wheel. It then replaces port 1, even with a controller
-// connected, however far it is turned, until Menu pauses or the race ends:
+// once to take the wheel. It then drives its port, however far it is turned, until Menu pauses or
+// the race ends:
 //   tilt (rotate it like a wheel)   steer
 //   nothing                         accelerate (held automatically once the race has started)
 //   click the touch surface         brake / reverse
@@ -58,7 +61,7 @@ void Poll(Sample& sample) noexcept;
 // Call once per guest PADRead, after the other GameCube input sources have been merged.
 void Apply(PADStatus* statuses) noexcept;
 
-// True while the remote drives port 1; its Play/Pause (the Pause key) is then an item, not the
+// True while the remote drives its port; its Play/Pause (the Pause key) is then an item, not the
 // settings bar toggle.
 bool Driving() noexcept;
 
