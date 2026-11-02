@@ -12,6 +12,9 @@
 #include "runtime_log.h"
 #include "wiimote_host.h"
 #include "platform/apple_target.h"
+#if MKW_HOST_TVOS
+#include "platform/siri_remote.h"
+#endif
 
 #include <imgui.h>
 #include <SDL3/SDL_events.h>
@@ -73,6 +76,13 @@ void SetMixWorkerEnabled(bool enabled);
 
 namespace settings_overlay {
 namespace {
+bool SiriRemoteOwnsMenuButton() {
+#if MKW_HOST_TVOS
+    return SiriRemote::OwnsMenuButton();
+#else
+    return false;
+#endif
+}
 
 const char* GraphicsApiDisplayName() {
     switch (aurora_get_backend()) {
@@ -1753,7 +1763,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
         // Siri Remote Play/Pause arrives as the Pause key; the controller's
         // Select-position button (View/Share/Create) is SDL's BACK, unbound by
         // default in the GameCube mapping.
-        settingsToggle = settingsToggle || IsToggleKey(ev->sdl, SDL_SCANCODE_PAUSE) ||
+        // While the remote drives a race its Play/Pause uses an item instead.
+        settingsToggle = settingsToggle ||
+                         (IsToggleKey(ev->sdl, SDL_SCANCODE_PAUSE) && !SiriRemote::Driving()) ||
                          (!controller_mapping_wizard::IsActive() &&
                           IsGamepadButtonPress(ev->sdl, SDL_GAMEPAD_BUTTON_BACK));
 #endif
@@ -1767,7 +1779,9 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             AudioBackend::Instance().SetMuted(g_audioMuted);
             RuntimeConfigFile::SetAudioMuted(g_audioMuted);
         }
-        if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_ESCAPE)) {
+        // The Siri Remote's Menu button arrives as Escape; while it drives a race it pauses
+        // the game instead (platform/siri_remote.h).
+        if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_ESCAPE) && !SiriRemoteOwnsMenuButton()) {
             if (g_restartPromptOpen) {
                 g_restartPromptOpen = false;
             } else if (g_exitPromptOpen) {

@@ -36,12 +36,14 @@ if(MKW_PLATFORM_MACOS)
 endif()
 
 if(MKW_PLATFORM_TVOS)
-    # The one Objective-C++ runtime source (AVAudioSession). It is kept out of
+    # The Objective-C++ runtime sources (AVAudioSession, Objective-C exceptions, the Siri Remote's
+    # GameController state). They are kept out of
     # mkw_runtime_common so the runtime's C++ unity batches and precompiled
     # header never have to be generated for Objective-C++.
     add_library(mkw_tvos_objc STATIC
         "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/external_audio_tvos.mm"
-        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/objc_exception_tvos.mm")
+        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/objc_exception_tvos.mm"
+        "${MKW_RUNTIME_SOURCE_DIR}/src/platform/tvos/siri_remote_tvos.mm")
     target_include_directories(mkw_tvos_objc PRIVATE "${MKW_RUNTIME_SOURCE_DIR}/include")
     target_compile_features(mkw_tvos_objc PRIVATE cxx_std_17)
     target_compile_options(mkw_tvos_objc PRIVATE -fobjc-arc -O2 -w)

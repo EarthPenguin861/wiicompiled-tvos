@@ -176,6 +176,28 @@ Things to know:
   returns to the Home screen as usual.
 - The Siri Remote never takes a player slot. Its arrows and Select reach the game through the
   keyboard bindings, which can be changed in the settings bar.
+- **Siri Remote as a steering wheel** (first-generation remote only: the black one with a glass
+  touch surface, which has motion sensors; later remotes have none). During a race, hold it
+  sideways like a Wii Remote in a Wii Wheel, face toward you, and it drives player 1:
+
+  | Remote | In the race |
+  | --- | --- |
+  | Tilt it like a wheel | Steer |
+  | (nothing) | Accelerate, held automatically once the race has started (not during the countdown, where it would burn out) |
+  | Click the touch surface | Brake / reverse |
+  | Play/Pause | Use item; tilt the face up to throw back, down to throw forward |
+  | Rest a finger on the touch surface | Hop / drift |
+  | Shake | Trick off a ramp, or a wheelie on a bike |
+  | Menu | Pause |
+
+  Pausing with Menu hands the remote back to the menus until it has been held upright once, so
+  the pause menu works with swipes and clicks; hold it sideways again to drive. Outside races,
+  after the finish line, held upright, or while a game controller is connected, the remote behaves
+  as described above.
+  `MKW_SIRI_REMOTE=0` in the launch environment turns the wheel off; `MKW_SIRI_REMOTE_LOCK`
+  (degrees of tilt for full lock, default 40), `MKW_SIRI_REMOTE_DEADZONE` (default 4),
+  `MKW_SIRI_REMOTE_SHAKE` (g, default 1.3) and `MKW_SIRI_REMOTE_INVERT=1` tune it
+  (`runtime/src/platform/tvos/siri_remote_wheel_tvos.cpp`).
 - **Wii Remotes are not supported:** tvOS only lets apps use controllers the system manages
   through the GameController framework.
 

@@ -3,6 +3,10 @@
 #include "hle/controller_status_contract.h"
 #include "input_bindings.h"
 #include "motion_trick.h"
+#include "platform/apple_target.h"
+#if MKW_HOST_TVOS
+#include "platform/siri_remote.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -117,6 +121,10 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 
     FillTriggersHeldByButtons(statuses);
     InputBindings::Apply(statuses);
+#if MKW_HOST_TVOS
+    // Held sideways during a race, the Siri Remote replaces port 1 (platform/siri_remote.h).
+    SiriRemote::Apply(statuses);
+#endif
     MotionTrick::Apply(statuses);
 
     try {
