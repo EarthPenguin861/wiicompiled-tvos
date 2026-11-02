@@ -172,32 +172,34 @@ Things to know:
   (the "Select" position; on MFi pads it is called Options) or **Play/Pause** on the Siri Remote.
   Move with the D-pad or the remote's arrows, confirm with **A** or **Select**, go back with **B**
   or **Menu**. The game's input is paused while the bar is open.
-- **Siri Remote Menu** during play opens the exit prompt (the desktop's Escape). The **TV** button
-  returns to the Home screen as usual.
-- The Siri Remote never takes a player slot. Its arrows and Select reach the game through the
-  keyboard bindings, which can be changed in the settings bar.
-- **Siri Remote as a steering wheel** (first-generation remote only: the black one with a glass
-  touch surface, which has motion sensors; later remotes have none). During a race, hold it
-  sideways like a Wii Remote in a Wii Wheel, face toward you, and it drives player 1:
+- **Siri Remote Menu** during play opens the exit prompt (the desktop's Escape), except with a
+  first-generation remote (below), where Menu is the game's Back. The **TV** button returns to
+  the Home screen as usual.
+- The Siri Remote never takes a player slot. Its arrows and Select reach the settings bar.
+- **First-generation Siri Remote** (the black one with a glass touch surface, which has motion
+  sensors; later remotes have none) also plays the game:
+  - **Menus:** swipe to move (one step per swipe), click to select (A), Menu to go back (B). These
+    presses are added to player 1, so a connected controller keeps working beside it.
+  - **Races:** hold it sideways like a Wii Remote in a Wii Wheel, face toward you, and **click
+    once to take the wheel** (a remote lying on its side never takes over). It then drives player
+    1, even with a controller connected, until you hold it upright or lay it flat:
 
-  | Remote | In the race |
-  | --- | --- |
-  | Tilt it like a wheel | Steer |
-  | (nothing) | Accelerate, held automatically once the race has started (not during the countdown, where it would burn out) |
-  | Click the touch surface | Brake / reverse |
-  | Play/Pause | Use item; tilt the face up to throw back, down to throw forward |
-  | Rest a finger on the touch surface | Hop / drift |
-  | Shake | Trick off a ramp, or a wheelie on a bike |
-  | Menu | Pause |
+    | Remote | In the race |
+    | --- | --- |
+    | Tilt it like a wheel | Steer |
+    | (nothing) | Accelerate, held automatically once the race has started (not during the countdown, where it would burn out) |
+    | Click the touch surface | Brake / reverse |
+    | Play/Pause | Use item; tilt the face up to throw back, down to throw forward |
+    | Rest a finger on the touch surface | Hop / drift |
+    | Shake | Trick off a ramp, or a wheelie on a bike |
+    | Menu | Pause |
 
-  Pausing with Menu hands the remote back to the menus until it has been held upright once, so
-  the pause menu works with swipes and clicks; hold it sideways again to drive. Outside races,
-  after the finish line, held upright, or while a game controller is connected, the remote behaves
-  as described above.
-  `MKW_SIRI_REMOTE=0` in the launch environment turns the wheel off; `MKW_SIRI_REMOTE_LOCK`
-  (degrees of tilt for full lock, default 40), `MKW_SIRI_REMOTE_DEADZONE` (default 4),
-  `MKW_SIRI_REMOTE_SHAKE` (g, default 1.3) and `MKW_SIRI_REMOTE_INVERT=1` tune it
-  (`runtime/src/platform/tvos/siri_remote_wheel_tvos.cpp`).
+    After pausing, the remote works the pause menu (swipe, click, Menu = back); hold it upright
+    once, then sideways and click again to drive. After the finish line it is back in menu mode.
+  - `MKW_SIRI_REMOTE=0` in the launch environment turns this off; `MKW_SIRI_REMOTE_LOCK` (degrees
+    of tilt for full lock, default 40), `MKW_SIRI_REMOTE_DEADZONE` (default 4),
+    `MKW_SIRI_REMOTE_SHAKE` (g, default 1.3) and `MKW_SIRI_REMOTE_INVERT=1` tune it
+    (`runtime/src/platform/tvos/siri_remote_wheel_tvos.cpp`).
 - **Wii Remotes are not supported:** tvOS only lets apps use controllers the system manages
   through the GameController framework.
 

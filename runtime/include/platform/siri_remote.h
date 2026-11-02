@@ -4,20 +4,24 @@
 
 struct PADStatus;
 
-// The first-generation Siri Remote (the one with motion sensors) as a steering wheel on Apple TV.
+// The first-generation Siri Remote (the one with motion sensors) in the game on Apple TV.
 //
-// Held sideways during a race, like a Wii Remote in a Wii Wheel, it drives GameCube port 1:
+// Menu mode (everywhere the remote is not driving): its presses are added to GameCube port 1,
+// beside any controller there: swipe = D-pad (one step per swipe), click = A, Menu = B (back), or
+// Start (pause) during a race. Play/Pause keeps opening the settings bar.
+//
+// Wheel mode, during a race: hold the remote sideways like a Wii Remote in a Wii Wheel (face
+// toward you) and click once to take the wheel. It then replaces port 1, even with a controller
+// connected, until it is held upright or laid flat, or Menu pauses:
 //   tilt (rotate it like a wheel)   steer
 //   nothing                         accelerate (held automatically once the race has started)
 //   click the touch surface         brake / reverse
 //   Play/Pause                      use item; tilt the face up to throw back, down to throw forward
 //   rest a finger on the surface    hop / drift
 //   shake                           trick off a ramp, or a wheelie on a bike
-//   Menu                            pause, and hand the remote back to the menus
-// Upright, outside a race, or once the race is finished, it keeps working as before (its presses
-// arrive as arrow, Return, Escape and Pause keys). Pausing with Menu releases the wheel until the
-// remote has been turned upright once, so the pause menu can be used with swipes and clicks. A
-// connected game controller turns the wheel off.
+//   Menu                            pause; the remote then works the pause menu until it has been
+//                                   held upright once
+// A remote resting on its side never takes over: the wheel needs the click.
 //
 // MKW_SIRI_REMOTE=0 turns it off; MKW_SIRI_REMOTE_LOCK (degrees of tilt for full lock, default
 // 40), MKW_SIRI_REMOTE_DEADZONE (degrees, default 4), MKW_SIRI_REMOTE_SHAKE (g, default 1.3) and
@@ -35,6 +39,8 @@ struct Sample {
     bool playPause = false;
     bool menu = false;
     bool touching = false;             // a finger rests on the touch surface
+    float touchX = 0.0f;               // finger position, -1 (left) .. 1 (right), remote upright
+    float touchY = 0.0f;               // -1 (bottom) .. 1 (top)
 };
 void Poll(Sample& sample) noexcept;
 
@@ -45,8 +51,8 @@ void Apply(PADStatus* statuses) noexcept;
 // settings bar toggle.
 bool Driving() noexcept;
 
-// True while the remote owns its Menu button (driving, or paused from driving); its Escape key
-// press must then not reach the settings overlay.
+// True while a remote with motion sensors is connected: its Menu button is the game's Back/Pause,
+// so its Escape key press must not open the settings overlay's exit prompt.
 bool OwnsMenuButton() noexcept;
 
 } // namespace SiriRemote

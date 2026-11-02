@@ -1779,16 +1779,16 @@ void HandleEvents(const AuroraEvent* events) noexcept {
             AudioBackend::Instance().SetMuted(g_audioMuted);
             RuntimeConfigFile::SetAudioMuted(g_audioMuted);
         }
-        // The Siri Remote's Menu button arrives as Escape; while it drives a race it pauses
-        // the game instead (platform/siri_remote.h).
-        if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_ESCAPE) && !SiriRemoteOwnsMenuButton()) {
+        if (!g_rebind.active && IsToggleKey(ev->sdl, SDL_SCANCODE_ESCAPE)) {
             if (g_restartPromptOpen) {
                 g_restartPromptOpen = false;
             } else if (g_exitPromptOpen) {
                 g_exitPromptOpen = false;
             } else if (g_topBarVisible) {
                 SetTopBarVisible(false);
-            } else if (!ValveControllerConnected()) {
+            } else if (!ValveControllerConnected() && !SiriRemoteOwnsMenuButton()) {
+                // The Siri Remote's Menu button arrives as Escape; in the game it is Back, or
+                // Pause during a race (platform/siri_remote.h), so it does not open the prompt.
                 g_exitPromptOpen = true;
             }
             ApplyInputBlockState();

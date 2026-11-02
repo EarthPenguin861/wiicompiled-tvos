@@ -1,4 +1,5 @@
-// The Siri Remote as a steering wheel during races (see platform/siri_remote.h).
+// The Siri Remote in the game: menu buttons, and a steering wheel during races
+// (see platform/siri_remote.h).
 
 #include "platform/apple_target.h"
 
@@ -7,6 +8,7 @@
 #include "platform/siri_remote.h"
 
 #include "guest_abi/guest_region.h"
+#include "input_bindings.h"
 #include "memory.h"
 #include "runtime_log.h"
 
@@ -30,6 +32,12 @@ constexpr float kLeaveSideways = 0.5f;
 constexpr float kItemAim = 0.45f;
 constexpr auto kTrickPress = std::chrono::milliseconds(120);
 constexpr auto kTrickRearm = std::chrono::milliseconds(450);
+// A swipe is the finger moving this far (the surface spans -1..1) from where it last stepped.
+constexpr float kSwipeStep = 0.45f;
+// A swipe holds its D-pad direction for this many PADReads, then releases it for at least one, so
+// every swipe reaches the game as its own press.
+constexpr int kSwipePressReads = 2;
+constexpr int kSwipeGapReads = 1;
 
 struct Settings {
     bool enabled = true;
@@ -70,15 +78,6 @@ const Settings& GetSettings() {
 
 using Clock = std::chrono::steady_clock;
 
-bool g_sideways = false;   // the remote is held sideways (with hysteresis)
-bool g_driving = false;    // the remote drives port 1 this frame
-bool g_suspended = false;  // Menu paused the race; released when the remote is held upright
-bool g_inRace = false;
-bool g_previousMenu = false;
-bool g_loggedDriving = false;
-Clock::time_point g_trickUntil{};
-Clock::time_point g_trickRearm{};
-
 // Raceinfo::sInstance is set by Raceinfo::CreateInstance when a race scene starts and cleared by
 // DestroyInstance when it ends. Its stage (offset 0x28, what Raceinfo::IsAtLeastStage compares):
 // 0 intro, 1 countdown, 2 racing, 3 and up finished.
@@ -97,6 +96,30 @@ RaceStage CurrentRaceStage() noexcept {
     }
 }
 
+struct State {
+    bool remote = false;          // a remote with motion sensors was seen on the last read
+    bool sideways = false;        // held sideways (with hysteresis)
+    bool grabbed = false;         // a click while sideways in a race handed it the wheel
+    bool grabClickHeld = false;   // the grabbing click has not been released yet
+    bool driving = false;         // it drives port 1 on this read
+    bool suspended = false;       // Menu paused the race; released when it is held upright
+    bool previousMenu = false;
+    bool previousClick = false;
+    bool menuConsumed = false;    // the Menu press that paused is held; it must not also go back
+    bool loggedGrab = false;
+    Clock::time_point trickUntil{};
+    Clock::time_point trickRearm{};
+    // Swipes (menu mode).
+    bool touchActive = false;
+    float anchorX = 0.0f;
+    float anchorY = 0.0f;
+    uint16_t swipeButton = 0;
+    int swipeReadsLeft = 0;
+    int swipeGapLeft = 0;
+};
+
+State g_state;
+
 // Steering angle in degrees, positive when the remote is turned clockwise (seen from the player),
 // with the remote held like a wheel: face toward the player, touch surface at either end.
 float SteeringDegrees(const Sample& sample) noexcept {
@@ -111,53 +134,69 @@ int8_t StickFromDegrees(float degrees, const Settings& settings) noexcept {
     return static_cast<int8_t>(std::lround((degrees < 0.0f ? -amount : amount) * 127.0f));
 }
 
-} // namespace
-
-bool Driving() noexcept {
-    return g_driving;
+void ResetSwipe() noexcept {
+    g_state.touchActive = false;
+    g_state.swipeButton = 0;
+    g_state.swipeReadsLeft = 0;
+    g_state.swipeGapLeft = 0;
 }
 
-bool OwnsMenuButton() noexcept {
-    return g_inRace && (g_driving || g_suspended);
+// One D-pad press per swipe step, from the finger's movement since the last step.
+uint16_t SwipeButtons(const Sample& sample) noexcept {
+    if (!sample.touching) {
+        g_state.touchActive = false;
+    } else if (!g_state.touchActive) {
+        g_state.touchActive = true;
+        g_state.anchorX = sample.touchX;
+        g_state.anchorY = sample.touchY;
+    } else if (g_state.swipeReadsLeft == 0 && g_state.swipeGapLeft == 0) {
+        const float dx = sample.touchX - g_state.anchorX;
+        const float dy = sample.touchY - g_state.anchorY;
+        if (std::max(std::fabs(dx), std::fabs(dy)) >= kSwipeStep) {
+            if (std::fabs(dx) > std::fabs(dy)) {
+                g_state.swipeButton = dx > 0.0f ? PAD_BUTTON_RIGHT : PAD_BUTTON_LEFT;
+            } else {
+                g_state.swipeButton = dy > 0.0f ? PAD_BUTTON_UP : PAD_BUTTON_DOWN;
+            }
+            g_state.swipeReadsLeft = kSwipePressReads;
+            g_state.anchorX = sample.touchX;
+            g_state.anchorY = sample.touchY;
+        }
+    }
+    if (g_state.swipeReadsLeft > 0) {
+        if (--g_state.swipeReadsLeft == 0) {
+            g_state.swipeGapLeft = kSwipeGapReads;
+        }
+        return g_state.swipeButton;
+    }
+    if (g_state.swipeGapLeft > 0) {
+        --g_state.swipeGapLeft;
+    }
+    return 0;
 }
 
-void Apply(PADStatus* statuses) noexcept {
-    const Settings& settings = GetSettings();
-    Sample sample;
-    if (statuses == nullptr || !settings.enabled) {
-        g_driving = false;
-        return;
+// Menu mode: the remote's presses are added to port 1, beside whatever controller is there.
+// `menuButton` is B (back) in menus and the pause menu, Start (pause) during a race.
+void ApplyMenuButtons(PADStatus& pad, const Sample& sample, uint16_t menuButton) noexcept {
+    uint16_t buttons = SwipeButtons(sample);
+    if (sample.click) {
+        buttons |= PAD_BUTTON_A;
+        pad.analogA = 255;
     }
-    Poll(sample);
-    const RaceStage stage = CurrentRaceStage();
-    // After the finish the results and menus are driven by the remote's keys again; holding A
-    // there would click straight through them.
-    g_inRace = stage == RaceStage::Starting || stage == RaceStage::Racing;
-    if (!sample.remote || sample.gameController || !g_inRace) {
-        g_driving = false;
-        g_suspended = false;
-        g_previousMenu = sample.menu;
-        return;
+    if (sample.menu && !g_state.menuConsumed) {
+        buttons |= menuButton;
+        if (menuButton == PAD_BUTTON_B) {
+            pad.analogB = 255;
+        }
     }
+    if (buttons != 0) {
+        pad.button |= buttons;
+        pad.err = PAD_ERR_NONE;
+    }
+}
 
-    const float sideways = std::fabs(sample.gravity[0]);
-    g_sideways = g_sideways ? sideways > kLeaveSideways : sideways > kEnterSideways;
-    if (!g_sideways) {
-        g_suspended = false;
-    }
-    const bool menuPressed = sample.menu && !g_previousMenu;
-    g_previousMenu = sample.menu;
-    g_driving = g_sideways && !g_suspended;
-    if (!g_driving) {
-        return;
-    }
-    if (!g_loggedDriving) {
-        g_loggedDriving = true;
-        RT_LOGF("siri-remote", "the Siri Remote is driving (held sideways during a race)\n");
-    }
-
-    // While held as a wheel the remote is port 1, whatever its keys or a keyboard mapped there.
-    PADStatus& pad = statuses[0];
+// Wheel mode: the remote replaces port 1.
+void ApplyWheel(PADStatus& pad, const Sample& sample, RaceStage stage, const Settings& settings) noexcept {
     std::memset(&pad, 0, sizeof(pad));
     pad.err = PAD_ERR_NONE;
 
@@ -172,10 +211,13 @@ void Apply(PADStatus* statuses) noexcept {
         pad.stickY = 100;   // face tilted down: aim forward
     }
 
-    if (sample.click) {
+    if (!sample.click) {
+        g_state.grabClickHeld = false;
+    }
+    if (sample.click && !g_state.grabClickHeld) {
         pad.button |= PAD_BUTTON_B;
         pad.analogB = 255;
-    } else if (stage == RaceStage::Racing) {
+    } else if (!sample.click && stage == RaceStage::Racing) {
         // Not during the countdown: accelerating too early there makes the kart burn out.
         pad.button |= PAD_BUTTON_A;
         pad.analogA = 255;
@@ -194,23 +236,103 @@ void Apply(PADStatus* statuses) noexcept {
     const auto now = Clock::now();
     const float* user = sample.userAcceleration;
     const float shake = std::sqrt(user[0] * user[0] + user[1] * user[1] + user[2] * user[2]);
-    if (shake > settings.shakeG && now >= g_trickRearm) {
-        g_trickUntil = now + kTrickPress;
-        g_trickRearm = now + kTrickRearm;
+    if (shake > settings.shakeG && now >= g_state.trickRearm) {
+        g_state.trickUntil = now + kTrickPress;
+        g_state.trickRearm = now + kTrickRearm;
     }
-    if (now < g_trickUntil) {
+    if (now < g_state.trickUntil) {
         pad.button |= PAD_BUTTON_UP;
     }
+}
 
-    if (menuPressed) {
-        // Pause, then let go of port 1 so the pause menu works with the remote's keys.
-        pad.button = PAD_BUTTON_START;
-        pad.stickX = 0;
-        pad.stickY = 0;
-        pad.analogA = pad.analogB = pad.triggerL = pad.triggerR = 0;
-        g_suspended = true;
-        g_driving = false;
+} // namespace
+
+bool Driving() noexcept {
+    return g_state.driving;
+}
+
+bool OwnsMenuButton() noexcept {
+    return g_state.remote;
+}
+
+void Apply(PADStatus* statuses) noexcept {
+    const Settings& settings = GetSettings();
+    g_state.driving = false;
+    if (statuses == nullptr || !settings.enabled) {
+        g_state.remote = false;
+        return;
     }
+    Sample sample;
+    Poll(sample);
+    g_state.remote = sample.remote;
+    const bool clickPressed = sample.click && !g_state.previousClick;
+    const bool menuPressed = sample.menu && !g_state.previousMenu;
+    g_state.previousClick = sample.click;
+    g_state.previousMenu = sample.menu;
+    if (!sample.menu) {
+        g_state.menuConsumed = false;
+    }
+    // The settings bar, a prompt or the startup screen own the input while they are open.
+    if (!sample.remote || InputBindings::InputBlocked()) {
+        g_state.grabbed = false;
+        ResetSwipe();
+        return;
+    }
+
+    const RaceStage stage = CurrentRaceStage();
+    // After the finish the results and menus belong to menu mode again; holding A there would
+    // click straight through them.
+    const bool inRace = stage == RaceStage::Starting || stage == RaceStage::Racing;
+    const float sideways = std::fabs(sample.gravity[0]);
+    g_state.sideways = g_state.sideways ? sideways > kLeaveSideways : sideways > kEnterSideways;
+    if (!g_state.sideways || !inRace) {
+        g_state.grabbed = false;
+        g_state.suspended = false;
+    }
+
+    PADStatus& pad = statuses[0];
+    const auto pause = [&pad] {
+        // Pause, then hand the remote to the pause menu (menu mode) until it is held upright.
+        // The press stays consumed while held, or its next read would go back out of the menu.
+        std::memset(&pad, 0, sizeof(pad));
+        pad.err = PAD_ERR_NONE;
+        pad.button = PAD_BUTTON_START;
+        g_state.suspended = true;
+        g_state.grabbed = false;
+        g_state.driving = false;
+        g_state.menuConsumed = true;
+    };
+    if (inRace && g_state.sideways && !g_state.suspended) {
+        // Held like a wheel: a click takes over port 1 (a remote resting on its side never does),
+        // and the remote keeps it until it is held upright or laid flat, or Menu pauses.
+        if (!g_state.grabbed) {
+            if (menuPressed) {
+                pause();
+                return;
+            }
+            if (!clickPressed) {
+                return;
+            }
+            g_state.grabbed = true;
+            g_state.grabClickHeld = true;
+            ResetSwipe();
+            if (!g_state.loggedGrab) {
+                g_state.loggedGrab = true;
+                RT_LOGF("siri-remote", "the Siri Remote took the wheel\n");
+            }
+        }
+        g_state.driving = true;
+        ApplyWheel(pad, sample, stage, settings);
+        if (menuPressed) {
+            pause();
+        }
+        return;
+    }
+    if (inRace && !g_state.suspended && menuPressed) {
+        pause();
+        return;
+    }
+    ApplyMenuButtons(pad, sample, PAD_BUTTON_B);
 }
 
 } // namespace SiriRemote

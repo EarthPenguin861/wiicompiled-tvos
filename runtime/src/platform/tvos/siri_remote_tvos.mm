@@ -64,7 +64,9 @@ void Poll(Sample& sample) noexcept {
         sample.click = pad.buttonA.isPressed;
         sample.playPause = pad.buttonX.isPressed;
         sample.menu = pad.buttonMenu.isPressed;
-        sample.touching = pad.dpad.xAxis.value != 0.0f || pad.dpad.yAxis.value != 0.0f;
+        sample.touchX = pad.dpad.xAxis.value;
+        sample.touchY = pad.dpad.yAxis.value;
+        sample.touching = sample.touchX != 0.0f || sample.touchY != 0.0f;
     }
 }
 
