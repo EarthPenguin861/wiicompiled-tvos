@@ -24,12 +24,17 @@ namespace SiriRemote {
 namespace {
 
 constexpr float kRadiansToDegrees = 57.2957795f;
-// Held sideways: gravity mostly along the remote's x axis. Entering needs the remote within about
-// 37 degrees of sideways, leaving needs it past 60, so steering never drops out of the mode.
-constexpr float kEnterSideways = 0.8f;
-constexpr float kLeaveSideways = 0.5f;
-// Tilting the face this far (about 27 degrees) aims the item backwards or forwards.
-constexpr float kItemAim = 0.45f;
+// Held sideways: the long axis close to level (gravity along it under 0.5 g, about 30 degrees), and
+// not lying flat (some gravity along the short axis), however far the face is tilted back. It
+// stays sideways until the long axis passes about 58 degrees, so hard steering never drops out of
+// the mode, or until the remote is laid flat.
+constexpr float kEnterLongAxis = 0.5f;
+constexpr float kLeaveLongAxis = 0.85f;
+constexpr float kEnterShortAxis = 0.3f;
+constexpr float kLeaveShortAxis = 0.15f;
+// Tilting the face this far (about 20 degrees) from where it was when the wheel was taken aims the
+// item backwards or forwards.
+constexpr float kItemAim = 0.35f;
 constexpr auto kTrickPress = std::chrono::milliseconds(120);
 constexpr auto kTrickRearm = std::chrono::milliseconds(450);
 // A swipe is the finger moving this far (the surface spans -1..1) from where it last stepped.
@@ -107,6 +112,9 @@ struct State {
     bool previousClick = false;
     bool menuConsumed = false;    // the Menu press that paused is held; it must not also go back
     bool loggedGrab = false;
+    float aimBase = 0.0f;         // gravity along the face normal when the wheel was taken
+    int diagnosticsLeft = 200;
+    Clock::time_point nextDiagnostic{};
     Clock::time_point trickUntil{};
     Clock::time_point trickRearm{};
     // Swipes (menu mode).
@@ -120,11 +128,17 @@ struct State {
 
 State g_state;
 
+// Which way round it is held sideways: +1 or -1 by the sign of gravity along the short axis.
+float Side(const Sample& sample) noexcept {
+    return sample.gravity[0] >= 0.0f ? 1.0f : -1.0f;
+}
+
 // Steering angle in degrees, positive when the remote is turned clockwise (seen from the player),
-// with the remote held like a wheel: face toward the player, touch surface at either end.
+// with the remote held like a wheel, touch surface at either end: how far the long axis is tilted
+// from level. That does not depend on how far the face is tilted back toward the ceiling.
 float SteeringDegrees(const Sample& sample) noexcept {
-    const float side = sample.gravity[0] >= 0.0f ? 1.0f : -1.0f;
-    return std::atan2(side * sample.gravity[1], side * sample.gravity[0]) * kRadiansToDegrees;
+    const float along = std::clamp(Side(sample) * sample.gravity[1], -1.0f, 1.0f);
+    return std::asin(along) * kRadiansToDegrees;
 }
 
 int8_t StickFromDegrees(float degrees, const Settings& settings) noexcept {
@@ -141,8 +155,17 @@ void ResetSwipe() noexcept {
     g_state.swipeGapLeft = 0;
 }
 
-// One D-pad press per swipe step, from the finger's movement since the last step.
-uint16_t SwipeButtons(const Sample& sample) noexcept {
+// One D-pad press per swipe step, from the finger's movement since the last step. The touch
+// surface reports positions in the upright remote's frame; held sideways they are turned into the
+// player's, so a swipe toward the TV's right is Right whichever way round the remote is.
+uint16_t SwipeButtons(Sample sample) noexcept {
+    if (g_state.sideways) {
+        const float side = Side(sample);
+        const float x = sample.touchX;
+        const float y = sample.touchY;
+        sample.touchX = side * y;
+        sample.touchY = -side * x;
+    }
     if (!sample.touching) {
         g_state.touchActive = false;
     } else if (!g_state.touchActive) {
@@ -212,9 +235,10 @@ void ApplyWheel(PADStatus& pad, const Sample& sample, RaceStage stage, const Set
         degrees = -degrees;
     }
     pad.stickX = StickFromDegrees(degrees, settings);
-    if (sample.gravity[2] < -kItemAim) {
-        pad.stickY = -100;  // face tilted up: aim back
-    } else if (sample.gravity[2] > kItemAim) {
+    const float aim = sample.gravity[2] - g_state.aimBase;
+    if (aim < -kItemAim) {
+        pad.stickY = -100;  // face tilted further up: aim back
+    } else if (aim > kItemAim) {
         pad.stickY = 100;   // face tilted down: aim forward
     }
 
@@ -272,6 +296,19 @@ void Apply(PADStatus* statuses) noexcept {
     Sample sample;
     Poll(sample);
     g_state.remote = sample.remote;
+    if (sample.remote && g_state.diagnosticsLeft > 0 && Clock::now() >= g_state.nextDiagnostic) {
+        // A short trace for tuning: what the motion sensors report and what the remote is doing.
+        --g_state.diagnosticsLeft;
+        g_state.nextDiagnostic = Clock::now() + std::chrono::seconds(3);
+        RT_LOGF("siri-remote",
+                "gravity %.2f %.2f %.2f accel %.2f %.2f %.2f sideways %d grabbed %d driving %d "
+                "stage %d touch %.2f %.2f
+",
+                sample.gravity[0], sample.gravity[1], sample.gravity[2], sample.userAcceleration[0],
+                sample.userAcceleration[1], sample.userAcceleration[2], g_state.sideways ? 1 : 0,
+                g_state.grabbed ? 1 : 0, g_state.driving ? 1 : 0,
+                static_cast<int>(CurrentRaceStage()), sample.touchX, sample.touchY);
+    }
     const bool clickPressed = sample.click && !g_state.previousClick;
     const bool menuPressed = sample.menu && !g_state.previousMenu;
     g_state.previousClick = sample.click;
@@ -293,8 +330,11 @@ void Apply(PADStatus* statuses) noexcept {
     // After the finish the results and menus belong to menu mode again; holding A there would
     // click straight through them.
     const bool inRace = stage == RaceStage::Starting || stage == RaceStage::Racing;
-    const float sideways = std::fabs(sample.gravity[0]);
-    g_state.sideways = g_state.sideways ? sideways > kLeaveSideways : sideways > kEnterSideways;
+    const float longAxis = std::fabs(sample.gravity[1]);
+    const float shortAxis = std::fabs(sample.gravity[0]);
+    g_state.sideways = g_state.sideways
+                           ? longAxis < kLeaveLongAxis && shortAxis > kLeaveShortAxis
+                           : longAxis < kEnterLongAxis && shortAxis > kEnterShortAxis;
     if (!g_state.sideways || !inRace) {
         g_state.grabbed = false;
         g_state.suspended = false;
@@ -325,6 +365,7 @@ void Apply(PADStatus* statuses) noexcept {
             }
             g_state.grabbed = true;
             g_state.grabClickHeld = true;
+            g_state.aimBase = sample.gravity[2];
             ResetSwipe();
             if (!g_state.loggedGrab) {
                 g_state.loggedGrab = true;

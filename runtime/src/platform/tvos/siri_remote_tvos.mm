@@ -10,6 +10,8 @@
 
 #include "platform/siri_remote.h"
 
+#include <cstdio>
+
 #import <GameController/GameController.h>
 
 namespace SiriRemote {
@@ -50,6 +52,14 @@ void Poll(Sample& sample) noexcept {
             if (motion.sensorsRequireManualActivation) {
                 motion.sensorsActive = YES;
             }
+            // Some controllers only deliver fresh motion samples to an app that subscribed to them.
+            if (motion.valueChangedHandler == nil) {
+                motion.valueChangedHandler = ^(GCMotion*) {
+                };
+            }
+            std::fprintf(stderr, "[siri-remote] remote %s: gravity+acceleration %d, manual activation %d, active %d\n",
+                    remote.vendorName.UTF8String ?: "?", motion.hasGravityAndUserAcceleration ? 1 : 0,
+                    motion.sensorsRequireManualActivation ? 1 : 0, motion.sensorsActive ? 1 : 0);
             configured = remote;
         }
         sample.remote = true;

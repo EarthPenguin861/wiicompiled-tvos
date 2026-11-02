@@ -10,13 +10,17 @@ struct PADStatus;
 // beside any controller there: swipe = D-pad (one step per swipe), click = A, Menu = B (back), or
 // Start (pause) during a race. Play/Pause keeps opening the settings bar.
 //
-// Wheel mode, during a race: hold the remote sideways like a Wii Remote in a Wii Wheel (face
-// toward you) and click once to take the wheel. It then replaces port 1, even with a controller
+// Held sideways (touch surface at the left or right end, face toward you or tilted back), swipes
+// follow the TV: a swipe to the right is Right.
+//
+// Wheel mode, during a race: hold the remote sideways like a Wii Remote in a Wii Wheel and click
+// once to take the wheel. It then replaces port 1, even with a controller
 // connected, until it is held upright or laid flat, or Menu pauses:
 //   tilt (rotate it like a wheel)   steer
 //   nothing                         accelerate (held automatically once the race has started)
 //   click the touch surface         brake / reverse
-//   Play/Pause                      use item; tilt the face up to throw back, down to throw forward
+//   Play/Pause                      use item; tilt the face further up to throw back, down to
+//                                   throw forward
 //   rest a finger on the surface    hop / drift
 //   shake                           trick off a ramp, or a wheelie on a bike
 //   Menu                            pause; the remote then works the pause menu until it has been
