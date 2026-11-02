@@ -63,7 +63,7 @@ std::condition_variable g_headCv;
 std::mutex g_tailMutex;
 std::condition_variable g_tailCv;
 void (*g_waitCallback)() = nullptr;
-void (*g_inlineListener)() noexcept = nullptr;
+void (*g_inlineListener)(void* caller) noexcept = nullptr;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_abandon{false};
 std::atomic<bool> g_exited{false};
@@ -340,12 +340,12 @@ void Sync() {
 
 void SetWaitCallback(void (*callback)()) { g_waitCallback = callback; }
 
-void SetInlineListener(void (*listener)() noexcept) { g_inlineListener = listener; }
+void SetInlineListener(void (*listener)(void* caller) noexcept) { g_inlineListener = listener; }
 
 void BeginInline() {
     if (detail::t_inlineDepth == 0 && !detail::t_onWorker) {
         if (g_inlineListener != nullptr) {
-            g_inlineListener();
+            g_inlineListener(__builtin_return_address(0));
         }
         if (Active()) {
             Sync();
@@ -372,7 +372,7 @@ void Start() {
     g_abandon.store(false, std::memory_order_relaxed);
     g_exited.store(false, std::memory_order_relaxed);
     if (g_inlineListener != nullptr) {
-        g_inlineListener();
+        g_inlineListener(nullptr);
     }
     g_thread = new std::thread(WorkerMain);
     detail::g_active.store(true, std::memory_order_release);

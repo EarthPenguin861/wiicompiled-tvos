@@ -233,6 +233,57 @@ index 0000000..29dbd30
 +if (CMAKE_SCRIPT_MODE_FILE AND DEFINED IMGUI_SOURCE_DIR)
 +  aurora_imgui_apply_tvos_patches("${IMGUI_SOURCE_DIR}")
 +endif ()
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index afe6328..e5cd0a5 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -6,10 +6,15 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <cstdlib>
+ #include <cstring>
+ #include <limits>
+ #include <mutex>
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
++
+ #include <tracy/Tracy.hpp>
+ 
+ namespace aurora::gx::fifo {
+@@ -25,7 +30,29 @@ uint32_t sDlWritePos = 0;
+ 
+ namespace {
+ constexpr Module Log{"aurora::gx::fifo"};
+-constexpr auto kProcessingMode = ProcessingMode::Thread;
++// The processor thread suits machines with cores to spare. On a dual-core Apple TV HD it is one
++// more busy thread beside the game thread, the runtime's GX worker and the render worker, and every
++// EFB copy made its producer wait for it in drain(); processing on the producer instead removes
++// those hand-offs. AURORA_FIFO_MODE=thread|inline|drain overrides the default.
++ProcessingMode choose_processing_mode() noexcept {
++  if (const char* value = std::getenv("AURORA_FIFO_MODE")) {
++    if (std::strcmp(value, "thread") == 0) {
++      return ProcessingMode::Thread;
++    }
++    if (std::strcmp(value, "inline") == 0) {
++      return ProcessingMode::Inline;
++    }
++    if (std::strcmp(value, "drain") == 0) {
++      return ProcessingMode::Drain;
++    }
++  }
++#if defined(TARGET_OS_TV) && TARGET_OS_TV
++  return ProcessingMode::Inline;
++#else
++  return ProcessingMode::Thread;
++#endif
++}
++const ProcessingMode kProcessingMode = choose_processing_mode();
+ constexpr uint32_t kDrawBatchSize = 1;
+ 
+ bool sFrameActive = false;
 diff --git a/lib/system_info.cpp b/lib/system_info.cpp
 index 0361263..82500b5 100644
 --- a/lib/system_info.cpp

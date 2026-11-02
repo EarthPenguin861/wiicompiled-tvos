@@ -74,10 +74,11 @@ void FifoBurst(const uint8_t* data, uint32_t sizeBytes);
 // Called about every millisecond while the game thread waits in Sync.
 void SetWaitCallback(void (*callback)());
 
-// Called on the game thread when GX work starts running inline there (an outermost inline scope)
-// and when the worker starts or stops: the points after which a game-thread mirror of the
-// worker's state can no longer follow it (src/hle/gx/gx_vtx_mirror.h).
-void SetInlineListener(void (*listener)() noexcept);
+// Called on the game thread when GX work starts running inline there (an outermost inline scope,
+// with the code address that opened it) and when the worker starts (with null): the points after
+// which a game-thread mirror of the worker's state can no longer follow it
+// (src/hle/gx/gx_vtx_mirror.h).
+void SetInlineListener(void (*listener)(void* caller) noexcept);
 
 // Blocks until every recorded command has executed.
 void Sync();

@@ -32,12 +32,29 @@
 // All functions run on the game thread, and only on the recording path (GxWorker::ShouldDefer()).
 namespace GxVtxMirror {
 
+// Why the mirror stopped following the stream (counted and logged; see the .cpp).
+enum class Reason : uint8_t {
+    InlineScope,         // GX work ran inline on the game thread
+    DisplayList,         // GXCallDisplayList recorded
+    DebugShape,          // GXDrawSphere and friends change the layout on the worker
+    DirectChange,        // a layout setter ran on the game thread instead of being recorded
+    FifoCallDisplayList, // a CALL_DL packet in the gather-pipe stream
+    XfTooLarge,          // an XF load larger than the worker's FIFO buffer
+    VertexLayout,        // a draw whose vertex size the layout does not define
+    EndMidVertex,        // GXEnd before the begin's vertex data was complete
+    OddWrite,            // a 3-byte gather-pipe write
+    ReloadInBegin,       // at a sync, the worker was inside a begin
+    ReloadFifoBytes,     // at a sync, the worker held a partial packet
+    ReloadDisabled,      // turned off (environment or a verified mismatch)
+    Count
+};
+
 // True when a query may be answered from the mirror.
 bool Usable() noexcept;
 GXAttrType Desc(uint32_t attr) noexcept;
 VtxAttrFmt Fmt(uint32_t vtxFmt, uint32_t attr) noexcept;
 
-void Invalidate() noexcept;
+void Invalidate(Reason reason) noexcept;
 // Copies the worker's state. Only valid right after a Sync, inside an inline scope.
 void ReloadFromWorkerState() noexcept;
 

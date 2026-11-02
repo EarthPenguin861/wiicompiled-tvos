@@ -48,7 +48,7 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
         GxWorker::Submit([] { GX__ClearVtxDesc_8016dc34(); });
         return;
     }
-    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate();
+    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate(GxVtxMirror::Reason::DirectChange);
     bool changed = false;
     for(int i=0; i<26; ++i){
         changed |= g_hleGxState.vtxDesc[i] != GX_NONE;
@@ -66,7 +66,7 @@ extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
         GxWorker::Submit([=] { GX__SetVtxDesc_8016d3a4(a, t); });
         return;
     }
-    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate();
+    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate(GxVtxMirror::Reason::DirectChange);
     const uint32_t attr = CanonicalVtxAttr(a);
     if(attr>=26||attr==GX_VA_NULL) return;
     const GXAttrType oldType = g_hleGxState.vtxDesc[attr];
@@ -92,7 +92,7 @@ extern "C" void GX__SetVtxDescv_8016d608(uint32_t la) {
     if (GxWorker::ShouldDefer()) {
         for (const auto& [a, t] : list) GxVtxMirror::OnSetVtxDesc(a, t);
     } else if (!GxWorker::OnWorker()) {
-        GxVtxMirror::Invalidate();
+        GxVtxMirror::Invalidate(GxVtxMirror::Reason::DirectChange);
     }
     GxWorker::Run([list = std::move(list)] {
         for (const auto& [a, t] : list) GX__SetVtxDesc_8016d3a4(a, t);
@@ -157,7 +157,7 @@ extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, 
         GxWorker::Submit([=] { GX__SetVtxAttrFmt_8016dc68(vf, a, c, t, fr); });
         return;
     }
-    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate();
+    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate(GxVtxMirror::Reason::DirectChange);
     const uint32_t attr = CanonicalVtxAttr(a);
     if(vf<8&&attr<26){
         const VtxAttrFmt oldFmt = g_hleGxState.vtxAttrFmt[vf][attr];
@@ -191,7 +191,7 @@ extern "C" void GX__SetVtxAttrFmtv_8016de08(uint32_t vf, uint32_t la) {
     if (GxWorker::ShouldDefer()) {
         for (const auto& [a, c, t, fr] : list) GxVtxMirror::OnSetVtxAttrFmt(vf, a, c, t, fr);
     } else if (!GxWorker::OnWorker()) {
-        GxVtxMirror::Invalidate();
+        GxVtxMirror::Invalidate(GxVtxMirror::Reason::DirectChange);
     }
     GxWorker::Run([vf, list = std::move(list)] {
         for (const auto& [a, c, t, fr] : list) GX__SetVtxAttrFmt_8016dc68(vf, a, c, t, fr);
@@ -400,7 +400,7 @@ PPC_NATIVE_OVERRIDE_VOID(80048c30, GX__End_80048c30, (), ());
 
 extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
     if (GxWorker::ShouldDefer()) {
-        GxVtxMirror::Invalidate();
+        GxVtxMirror::Invalidate(GxVtxMirror::Reason::DebugShape);
         EnsureAuroraFrameActive();
         GxWorker::Submit([=] { GX__DrawSphere_80172a30(numMajor, numMinor); });
         return;
