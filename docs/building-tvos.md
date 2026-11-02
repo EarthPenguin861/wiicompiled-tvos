@@ -136,6 +136,23 @@ Your game data never enters the repository and never sits unencrypted on GitHub:
    ```
    Then install `~/wiicompiled-tvos/WiiCompiled.ipa` with atvloadly.
 
+**Small updates (game data copied once).** The app is about 2.7 GB, but only about 130 MB of that is
+the program; the rest is the game's `DATA` folder. Copying 2.7 GB to an Apple TV for every update is
+slow and needs twice that much free space, so the game files can instead be copied once into the
+app's data folder, where updates leave them alone:
+
+1. Install a normal (`bundled`) build once.
+2. Copy your extracted `DATA` folder into the app container as `Library/Caches/WiiCompiled/DATA`,
+   for example with pymobiledevice3's `apps push` or any tool that can write to an app container.
+3. From then on, run the workflow with **game data: separate** (`gh workflow run tvos.yml -f game_data=separate`,
+   or `--no-bundle-data` for `build-tvos.command`). The resulting app has no `DATA` folder; when its
+   bundle has none, the app reads `Library/Caches/WiiCompiled/DATA` instead (`paths.dvd_root` in
+   `Config.toml` still overrides both). Updates are then about 50 MB and keep your saves, settings
+   and the compiled-shader cache.
+
+tvOS may purge `Library/Caches` when the Apple TV runs very low on storage. If that happens, copy
+`DATA` again (or install a `bundled` build).
+
 Things to know:
 - On a **private** repository the GitHub Free plan includes roughly 200 macOS build minutes a month
   (macOS minutes count ten times). A full build may not fit; public repositories have no minute

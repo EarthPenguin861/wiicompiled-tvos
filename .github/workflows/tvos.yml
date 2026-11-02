@@ -6,7 +6,7 @@
 # so it is encrypted with the same key before it is published as the release `tvos-<run number>`;
 # Launcher/tvos/fetch-ipa.sh downloads and decrypts it on your own machine for atvloadly.
 name: tvOS build
-run-name: tvOS build for ${{ inputs.cpu }}
+run-name: tvOS build for ${{ inputs.cpu }} (game data ${{ inputs.game_data || 'bundled' }})
 
 on:
   workflow_dispatch:
@@ -20,6 +20,13 @@ on:
           - apple-a10   # Apple TV 4K (1st generation) and later
           - apple-a12   # Apple TV 4K (2nd generation) and later
           - apple-a15   # Apple TV 4K (3rd generation)
+      game_data:
+        description: Put the game files inside the app, or leave them out (copied once into the app's data folder, so updates stay small)
+        type: choice
+        default: bundled
+        options:
+          - bundled
+          - separate
 
 permissions:
   contents: write   # download game-data assets, publish the encrypted IPA release
@@ -99,7 +106,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/out" \
             --cpu "${{ inputs.cpu }}" \
             --adhoc-sign \
-            --ipa
+            --ipa ${{ inputs.game_data == 'separate' && '--no-bundle-data' || '' }}
           df -h /
 
       - name: Publish the encrypted IPA
@@ -115,5 +122,5 @@ jobs:
           tag="tvos-${{ github.run_number }}"
           gh release create "$tag" "$out"/WiiCompiled.ipa.enc.part-* \
             --target "${{ github.sha }}" \
-            --title "WiiCompiled tvOS build ${{ github.run_number }} (${{ inputs.cpu }})" \
+            --title "WiiCompiled tvOS build ${{ github.run_number }} (${{ inputs.cpu }}, game data ${{ inputs.game_data || 'bundled' }})" \
             --notes "Encrypted WiiCompiled.ipa (built for ${{ inputs.cpu }}). Download and decrypt with: bash Launcher/tvos/fetch-ipa.sh KEY_FILE OUT_DIR $tag"

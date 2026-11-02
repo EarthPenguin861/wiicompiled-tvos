@@ -1037,6 +1037,9 @@ inline std::filesystem::path ResolveRelativeToConfig(const std::string& value) {
 // The tvOS build copies the user's extracted DATA directory into the app bundle
 // (Launcher/tvos/build-tvos.command), because an Apple TV app has no other
 // place to read gigabytes of game files from and no way to edit Config.toml.
+// A build made with --no-bundle-data has no DATA in its bundle; it reads the
+// copy placed once in its data directory (Library/Caches/WiiCompiled/DATA),
+// which app updates keep.
 inline constexpr const char* kTvosBundledDvdRootName = "DATA";
 
 // The extracted DATA directory. Empty when nothing is configured.
@@ -1045,7 +1048,15 @@ inline std::filesystem::path ResolvedDvdRoot() {
 #if MKW_HOST_TVOS
     if (configured.empty()) {
         if (const auto executableDirectory = ExecutableDirectory()) {
-            return (*executableDirectory / kTvosBundledDvdRootName).lexically_normal();
+            const auto bundled = (*executableDirectory / kTvosBundledDvdRootName).lexically_normal();
+            std::error_code ec;
+            if (!std::filesystem::is_directory(bundled, ec)) {
+                const auto container = (ApplicationDataDirectory() / kTvosBundledDvdRootName).lexically_normal();
+                if (std::filesystem::is_directory(container, ec)) {
+                    return container;
+                }
+            }
+            return bundled;
         }
     }
 #endif

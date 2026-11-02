@@ -49,6 +49,9 @@ Signing (device builds)
 Packaging
   --ipa                           Also write WiiCompiled.ipa (Payload/WiiCompiled.app, zipped) beside
                                   the app, the format sideloading tools install
+  --no-bundle-data                Leave the game files (DATA) out of the app. The app then reads them
+                                  from DATA in its data folder (Library/Caches/WiiCompiled), where they
+                                  must be copied once; app updates then stay small and keep that copy
 
 Install
   --install                       Install on --device, or on the booted simulator with --simulator
@@ -70,6 +73,7 @@ EOF
 workspace="$default_workspace"; output_dir=""; game=""; nodtool=""
 simulator=0; cpu=apple-a8; deployment_target=15.0; bundle_id=local.wiicompiled.tvos
 profile_path=""; sign_identity=""; no_sign=0; adhoc_sign=0; make_ipa=0; install=0; device=""; launch=0
+bundle_data=1
 force_clean=0; parallel=0; cmake_bin=cmake; ninja_bin=ninja; dotnet_bin=dotnet; translator_bin=""
 setup_version=""
 while (($#)); do
@@ -87,6 +91,7 @@ while (($#)); do
         --no-sign) no_sign=1; shift ;;
         --adhoc-sign) adhoc_sign=1; shift ;;
         --ipa) make_ipa=1; shift ;;
+        --no-bundle-data) bundle_data=0; shift ;;
         --install) install=1; shift ;;
         --device) device=${2:-}; shift 2 ;;
         --launch) launch=1; shift ;;
@@ -252,15 +257,22 @@ done
 assert_dir "$built_app/wii_bootstrap" 'bundled Wii first-run bootstrap'
 lipo -archs "$built_app/WiiCompiled" 2>/dev/null | grep -qw arm64 || fail 'the built executable is not arm64'
 
-step bundle 'Assembling WiiCompiled.app with the extracted game data'
 mkdir -p "$output_dir"
 output_dir=$(cd "$output_dir" && pwd)
 app="$output_dir/WiiCompiled.app"
 mkdir -p "$app"
-# DATA is excluded from the first pass, which also protects it from --delete; the second pass
-# mirrors it incrementally so a rebuild does not recopy gigabytes of unchanged game files.
-rsync -a --delete --exclude '/DATA' --exclude '/_CodeSignature' --exclude '/embedded.mobileprovision' "$built_app/" "$app/"
-rsync -a --delete "$assets/DATA/" "$app/DATA/"
+if (( bundle_data )); then
+    step bundle 'Assembling WiiCompiled.app with the extracted game data'
+    # DATA is excluded from the first pass, which also protects it from --delete; the second pass
+    # mirrors it incrementally so a rebuild does not recopy gigabytes of unchanged game files.
+    rsync -a --delete --exclude '/DATA' --exclude '/_CodeSignature' --exclude '/embedded.mobileprovision' "$built_app/" "$app/"
+    rsync -a --delete "$assets/DATA/" "$app/DATA/"
+else
+    step bundle 'Assembling WiiCompiled.app without the game data (--no-bundle-data)'
+    rsync -a --delete --exclude '/_CodeSignature' --exclude '/embedded.mobileprovision' "$built_app/" "$app/"
+    rm -rf "$app/DATA"
+    note 'The app reads the game files from Library/Caches/WiiCompiled/DATA in its container; copy them there once (docs/building-tvos.md)'
+fi
 rm -rf "$app/_CodeSignature" "$app/embedded.mobileprovision"
 bundle_kib=$(du -sk "$app" | awk '{print $1}')
 note "WiiCompiled.app is $(( bundle_kib / 1024 )) MiB"
