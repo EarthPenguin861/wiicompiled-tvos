@@ -302,8 +302,7 @@ void Apply(PADStatus* statuses) noexcept {
         g_state.nextDiagnostic = Clock::now() + std::chrono::seconds(3);
         RT_LOGF("siri-remote",
                 "gravity %.2f %.2f %.2f accel %.2f %.2f %.2f sideways %d grabbed %d driving %d "
-                "stage %d touch %.2f %.2f
-",
+                "stage %d touch %.2f %.2f\n",
                 sample.gravity[0], sample.gravity[1], sample.gravity[2], sample.userAcceleration[0],
                 sample.userAcceleration[1], sample.userAcceleration[2], g_state.sideways ? 1 : 0,
                 g_state.grabbed ? 1 : 0, g_state.driving ? 1 : 0,
