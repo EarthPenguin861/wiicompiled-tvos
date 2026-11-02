@@ -222,6 +222,30 @@ builds. The tvOS-specific pieces:
 - **Paths.** User data lives in `Library/Caches` (`runtime/src/platform/host_platform.cpp`), and the
   DVD root defaults to the `DATA` folder inside the app bundle (`runtime/include/runtime_config.h`).
 
+## Measuring performance
+
+Two switches, both read from the launch environment, measure the game on the device without
+Instruments. With [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) and a running
+`pymobiledevice3 remote tunneld`:
+
+```sh
+pymobiledevice3 developer dvt launch "<bundle id> --race-cpu" \
+    --env MKW_PERF_STATS=1 --env MKW_SAMPLE_PROFILE=45:60:1000
+```
+
+- `--race-cpu` boots straight into a 12-racer 150cc VS race on Luigi Circuit with the CPU driving
+  your kart, so every run measures the same scene with nobody holding a controller
+  (`--race=<course id>` picks another course and lets you drive).
+- `MKW_PERF_STATS=1` writes the game thread's busy milliseconds per frame (average, median, 95th
+  percentile, worst) to the run's `console.log` every 240 frames.
+- `MKW_SAMPLE_PROFILE=<delay>:<duration>:<Hz>` starts the built-in sampling profiler
+  (`runtime/src/platform/tvos/sample_profiler_tvos.cpp`) after `<delay>` seconds. It writes
+  `Logs/profile-<pid>.bin` (program counter and frame-pointer call chain of every thread that used
+  CPU time, sampled `<Hz>` times a second for `<duration>` seconds) and `Logs/profile-<pid>.txt`
+  (each thread's CPU share and priority, and the loaded images).
+  `python3 Launcher/tvos/analyze-profile.py Logs/profile-<pid> WiiCompiled.app/WiiCompiled` turns
+  them into per-thread self and inclusive time by function.
+
 ## Troubleshooting
 
 - **"the appletvos SDK was not found"**: install the tvOS platform in Xcode and select Xcode with

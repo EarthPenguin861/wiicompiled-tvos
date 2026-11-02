@@ -118,6 +118,7 @@ int SDLCALL RunOnGameStack(int argc, char* argv[]) {
 
 int RunApplication(int argc, char** argv, EntryPoint entry) {
     g_launch.entry = entry;
+    StartSampleProfilerFromEnvironment();
 
     // Hints read when SDL brings up its subsystems inside aurora_initialize.
     //

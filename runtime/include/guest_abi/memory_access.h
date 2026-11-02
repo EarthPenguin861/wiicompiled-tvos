@@ -222,21 +222,74 @@ MKW_MEMORY_FORCE_INLINE bool TryGetWritablePointerFast(
     return true;
 }
 
+// Checked form, for hosts without usable flat-view page protections (no flat view at all on tvOS; host pages
+// larger than a Wii page on Apple Silicon). The range is answered from the same bias tables the checked scalar
+// accessors consult, and only when they prove every byte of it plain RAM for the access kinds the range needs:
+//   - reads: the readable bias, which deferred-read pages clear;
+//   - writes: the writable bias, which is set only for 1 MiB pages without executable bytes, or for a mixed
+//     page the sparse 4 KiB table plus the exact executable-write guard, as TryGetWritablePointerFast does;
+//   - a range crossing into the next 1 MiB page needs the same nonzero bias there, i.e. contiguous host memory.
+// Anything else (MMIO, pending deferred reads, executable sub-pages, small mappings such as the locked cache)
+// still resolves null, which keeps every access of the range on the checked Memory::* path exactly as before.
+// Returning null here unconditionally made every resolved access a call into the cold fallback, which is what
+// the range lowering exists to avoid.
+// Mixed executable/data 1 MiB page (zero coarse writable bias): prove each touched 4 KiB sub-page through the
+// sparse table and the exact executable-write guard. Out of line: such pages are rare and the check is long.
+MKW_MEMORY_NO_INLINE inline uint8_t* ResolveRangeHostCheckedSparse(uint32_t guestStart, uint32_t guestEnd,
+                                                                 bool needsRead) {
+    const uint32_t page = guestStart >> kPageShift;
+    const auto* subTable = g_sparseWritablePageTables[page];
+    if (subTable == nullptr || (guestEnd >> kPageShift) != page) return nullptr;
+    const uint32_t firstSub = (guestStart & kPageMask) >> kWritableSubPageShift;
+    const uint32_t lastSub = (guestEnd & kPageMask) >> kWritableSubPageShift;
+    if (lastSub - firstSub > 1u) return nullptr;
+    const uintptr_t encodedBias = subTable->encodedBias[firstSub];
+    if (encodedBias == 0 || subTable->encodedBias[lastSub] != encodedBias) return nullptr;
+    if (RecompMod::g_executableWriteGuardPages[guestStart >> kWritableSubPageShift].load(
+            std::memory_order_relaxed) != 0 ||
+        RecompMod::g_executableWriteGuardPages[guestEnd >> kWritableSubPageShift].load(
+            std::memory_order_relaxed) != 0) {
+        return nullptr;
+    }
+    if (needsRead && g_fullReadablePageBias[page] != encodedBias) return nullptr;
+    return reinterpret_cast<uint8_t*>((encodedBias - 1u) + guestStart);
+}
+
+MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHostChecked(uint32_t guestStart, uint32_t length,
+                                                        bool needsRead, bool needsWrite) {
+    const uint32_t guestEnd = guestStart + (length - 1);
+    const uint32_t firstPage = guestStart >> kPageShift;
+    const uint32_t lastPage = guestEnd >> kPageShift;
+    if (lastPage - firstPage > 1u) [[unlikely]] return nullptr;
+    uintptr_t encodedBias = 0;
+    if (needsWrite) {
+        encodedBias = g_fullWritablePageBias[firstPage];
+        if (encodedBias == 0) [[unlikely]]
+            return ResolveRangeHostCheckedSparse(guestStart, guestEnd, needsRead);
+        if (g_fullWritablePageBias[lastPage] != encodedBias) [[unlikely]] return nullptr;
+        if (needsRead && (g_fullReadablePageBias[firstPage] != encodedBias ||
+                          g_fullReadablePageBias[lastPage] != encodedBias)) [[unlikely]] {
+            return nullptr;
+        }
+    } else {
+        encodedBias = g_fullReadablePageBias[firstPage];
+        if (encodedBias == 0 || g_fullReadablePageBias[lastPage] != encodedBias) [[unlikely]] return nullptr;
+    }
+    return reinterpret_cast<uint8_t*>((encodedBias - 1u) + guestStart);
+}
+
 // Flat form: guest_flat_memory.h's page protections already answer mapped/non-deferred/non-executable, so resolving is pure address arithmetic.
 // Two checks stay inline: a wrapped guest address can't survive 64-bit `host + rangeOffset`, and an MMIO write's value isn't recoverable from a
 // fault record, so a write touching that window must resolve null and fall back to Memory::Write*. Checking both range endpoints is a complete
 // proof since length <= kPageSize (1 MiB) can't straddle the 32 MiB MMIO window.
 MKW_MEMORY_FORCE_INLINE uint8_t* ResolveRangeHost(uint32_t base, int32_t minOffset, uint32_t length,
                                                  bool needsRead, bool needsWrite) {
-    (void)needsRead;
     const uint32_t guestStart = base + static_cast<uint32_t>(minOffset);
     if (length == 0 || length > kPageSize || guestStart > UINT32_MAX - (length - 1)) return nullptr;
     if (GuestFlat::RequiresCheckedAccess()) {
-        // A host page can cover multiple independently-special Wii pages.
-        // Returning null keeps resolved accesses on the checked Memory::*
-        // path, which materializes deferred reads and applies write policy.
-        (void)needsWrite;
-        return nullptr;
+        // A host page can cover multiple independently-special Wii pages, so
+        // the flat view's protections cannot be trusted; the bias tables can.
+        return ResolveRangeHostChecked(guestStart, length, needsRead, needsWrite);
     }
     if (needsWrite &&
         (FlatWriteNeedsPolicy(guestStart) || FlatWriteNeedsPolicy(guestStart + (length - 1))))
