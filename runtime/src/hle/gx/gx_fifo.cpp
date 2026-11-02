@@ -1,6 +1,7 @@
 #include "gx_internal.h"
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
+#include "gx_vtx_mirror.h"
 #include "isa/big_endian.h"
 
 // Opcode constants and the stream helpers this file shares with gx_dl.cpp /
@@ -790,6 +791,7 @@ extern "C" void GX_HLE_FIFO_WriteBurst(const uint8_t* data, uint32_t sizeBytes) 
     }
     if (GxWorker::ShouldDefer()) {
         EnsureAuroraFrameForFifo();
+        GxVtxMirror::OnFifoBurst(data, sizeBytes);
         GxWorker::FifoBurst(data, sizeBytes);
         return;
     }

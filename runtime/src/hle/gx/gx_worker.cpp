@@ -18,6 +18,9 @@
 #if defined(_WIN32)
 #include <windows.h>
 #endif
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
 #endif
@@ -60,6 +63,7 @@ std::condition_variable g_headCv;
 std::mutex g_tailMutex;
 std::condition_variable g_tailCv;
 void (*g_waitCallback)() = nullptr;
+void (*g_inlineListener)() noexcept = nullptr;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_abandon{false};
 std::atomic<bool> g_exited{false};
@@ -187,6 +191,13 @@ void WorkerMain() {
     AuroraSetGxProducerThread();
 #if defined(_WIN32)
     SetThreadDescription(GetCurrentThread(), L"GX worker");
+#elif defined(__APPLE__)
+    pthread_setname_np("GX worker");
+    // A std::thread starts in the default QoS class, below the game thread and Aurora's FIFO
+    // processor and render worker (user-initiated). On a 2-core Apple TV HD the worker then ran
+    // only when the game thread blocked on it in Sync, which serialized the two. It sits on the
+    // critical path between them, so it gets the class above both.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
     uint64_t tail = g_tail.load(std::memory_order_relaxed);
     for (;;) {
@@ -329,9 +340,16 @@ void Sync() {
 
 void SetWaitCallback(void (*callback)()) { g_waitCallback = callback; }
 
+void SetInlineListener(void (*listener)() noexcept) { g_inlineListener = listener; }
+
 void BeginInline() {
-    if (detail::t_inlineDepth == 0 && Active() && !detail::t_onWorker) {
-        Sync();
+    if (detail::t_inlineDepth == 0 && !detail::t_onWorker) {
+        if (g_inlineListener != nullptr) {
+            g_inlineListener();
+        }
+        if (Active()) {
+            Sync();
+        }
     }
     ++detail::t_inlineDepth;
 }
@@ -353,6 +371,9 @@ void Start() {
     g_stop.store(false, std::memory_order_relaxed);
     g_abandon.store(false, std::memory_order_relaxed);
     g_exited.store(false, std::memory_order_relaxed);
+    if (g_inlineListener != nullptr) {
+        g_inlineListener();
+    }
     g_thread = new std::thread(WorkerMain);
     detail::g_active.store(true, std::memory_order_release);
     RT_LOGF(RT_TAG_GX, "GX worker started\n");

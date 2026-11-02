@@ -12,40 +12,43 @@ inline bool SameVtxAttrFmt(const VtxAttrFmt& lhs, const VtxAttrFmt& rhs) {
     return lhs.cnt == rhs.cnt && lhs.type == rhs.type && lhs.frac == rhs.frac;
 }
 
-inline void VcdLo(uint32_t value) {
+// The decoders write a vertex descriptor (VCD) array and a vertex attribute format (VAT) table
+// passed in, and report whether anything changed. The GX worker applies them to g_hleGxState
+// (the wrappers below); the game thread's mirror (gx_vtx_mirror.cpp) applies the same decode to
+// its own copy, so both follow one definition of every register.
+using VtxDescArray = GXAttrType[26];
+using VtxAttrFmtTable = VtxAttrFmt[8][26];
+
+inline bool VcdLoInto(VtxDescArray& desc, uint32_t value) {
     bool changed = false;
     const auto assign = [&changed](GXAttrType& dst, GXAttrType next) {
         changed |= dst != next;
         dst = next;
     };
     for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7MTXIDX; ++i) {
-        assign(g_hleGxState.vtxDesc[i], (value & (1u << i)) ? GX_DIRECT : GX_NONE);
+        assign(desc[i], (value & (1u << i)) ? GX_DIRECT : GX_NONE);
     }
-    assign(g_hleGxState.vtxDesc[GX_VA_POS], AttrType2(value >> 9));
-    assign(g_hleGxState.vtxDesc[GX_VA_NRM], AttrType2(value >> 11));
-    assign(g_hleGxState.vtxDesc[GX_VA_CLR0], AttrType2(value >> 13));
-    assign(g_hleGxState.vtxDesc[GX_VA_CLR1], AttrType2(value >> 15));
-    assign(g_hleGxState.vtxDesc[GX_VA_NBT], GX_NONE);
-    if (changed) {
-        g_hleGxState.InvalidateVtxLayoutHash();
-    }
+    assign(desc[GX_VA_POS], AttrType2(value >> 9));
+    assign(desc[GX_VA_NRM], AttrType2(value >> 11));
+    assign(desc[GX_VA_CLR0], AttrType2(value >> 13));
+    assign(desc[GX_VA_CLR1], AttrType2(value >> 15));
+    assign(desc[GX_VA_NBT], GX_NONE);
+    return changed;
 }
 
-inline void VcdHi(uint32_t value) {
+inline bool VcdHiInto(VtxDescArray& desc, uint32_t value) {
     bool changed = false;
     for (int tex = 0; tex < 8; ++tex) {
-        auto& dst = g_hleGxState.vtxDesc[GX_VA_TEX0 + tex];
+        auto& dst = desc[GX_VA_TEX0 + tex];
         const auto next = AttrType2(value >> (tex * 2));
         changed |= dst != next;
         dst = next;
     }
-    if (changed) {
-        g_hleGxState.InvalidateVtxLayoutHash();
-    }
+    return changed;
 }
 
-inline void VatA(uint8_t fmt, uint32_t value) {
-    auto& attrs = g_hleGxState.vtxAttrFmt[fmt];
+inline bool VatAInto(VtxAttrFmtTable& table, uint8_t fmt, uint32_t value) {
+    auto& attrs = table[fmt];
     const VtxAttrFmt oldPos = attrs[GX_VA_POS];
     const VtxAttrFmt oldNrm = attrs[GX_VA_NRM];
     const VtxAttrFmt oldClr0 = attrs[GX_VA_CLR0];
@@ -77,15 +80,13 @@ inline void VatA(uint8_t fmt, uint32_t value) {
     tex0.cnt = ((value >> 21) & 1u) ? GX_TEX_ST : GX_TEX_S;
     tex0.type = static_cast<GXCompType>((value >> 22) & 7u);
     tex0.frac = static_cast<u8>((value >> 25) & 0x1fu);
-    if (!SameVtxAttrFmt(oldPos, pos) || !SameVtxAttrFmt(oldNrm, nrm) ||
-        !SameVtxAttrFmt(oldClr0, clr0) || !SameVtxAttrFmt(oldClr1, clr1) ||
-        !SameVtxAttrFmt(oldTex0, tex0)) {
-        g_hleGxState.InvalidateVtxLayoutHash();
-    }
+    return !SameVtxAttrFmt(oldPos, pos) || !SameVtxAttrFmt(oldNrm, nrm) ||
+           !SameVtxAttrFmt(oldClr0, clr0) || !SameVtxAttrFmt(oldClr1, clr1) ||
+           !SameVtxAttrFmt(oldTex0, tex0);
 }
 
-inline void VatB(uint8_t fmt, uint32_t value) {
-    auto& attrs = g_hleGxState.vtxAttrFmt[fmt];
+inline bool VatBInto(VtxAttrFmtTable& table, uint8_t fmt, uint32_t value) {
+    auto& attrs = table[fmt];
     VtxAttrFmt before[4];
     for (int tex = 1; tex <= 4; ++tex) before[tex - 1] = attrs[GX_VA_TEX0 + tex];
     for (int tex = 1; tex <= 4; ++tex) {
@@ -99,13 +100,11 @@ inline void VatB(uint8_t fmt, uint32_t value) {
     }
     bool changed = false;
     for (int tex = 1; tex <= 4; ++tex) changed |= !SameVtxAttrFmt(before[tex - 1], attrs[GX_VA_TEX0 + tex]);
-    if (changed) {
-        g_hleGxState.InvalidateVtxLayoutHash();
-    }
+    return changed;
 }
 
-inline void VatC(uint8_t fmt, uint32_t value) {
-    auto& attrs = g_hleGxState.vtxAttrFmt[fmt];
+inline bool VatCInto(VtxAttrFmtTable& table, uint8_t fmt, uint32_t value) {
+    auto& attrs = table[fmt];
     VtxAttrFmt before[4];
     for (int tex = 4; tex <= 7; ++tex) before[tex - 4] = attrs[GX_VA_TEX0 + tex];
     attrs[GX_VA_TEX4].frac = static_cast<u8>(value & 0x1fu);
@@ -118,7 +117,63 @@ inline void VatC(uint8_t fmt, uint32_t value) {
     }
     bool changed = false;
     for (int tex = 4; tex <= 7; ++tex) changed |= !SameVtxAttrFmt(before[tex - 4], attrs[GX_VA_TEX0 + tex]);
-    if (changed) {
+    return changed;
+}
+
+// The CP registers that hold vertex layout state (VCD and VAT), decoded into the given arrays.
+// Returns false for every other register, which the caller handles (or, for the mirror, ignores:
+// none of them affects the vertex layout).
+inline bool ApplyVtxLayoutCpRegWrite(VtxDescArray& desc, VtxAttrFmtTable& table, uint8_t reg,
+                                     uint32_t value, bool& changed) {
+    if (reg == 0x50) {
+        changed = VcdLoInto(desc, value);
+        return true;
+    }
+    if (reg == 0x60) {
+        changed = VcdHiInto(desc, value);
+        return true;
+    }
+    if (reg >= 0x70 && reg <= 0x77) {
+        changed = VatAInto(table, static_cast<uint8_t>(reg - 0x70), value);
+        return true;
+    }
+    if (reg >= 0x80 && reg <= 0x87) {
+        changed = VatBInto(table, static_cast<uint8_t>(reg - 0x80), value);
+        return true;
+    }
+    if (reg >= 0x90 && reg <= 0x97) {
+        changed = VatCInto(table, static_cast<uint8_t>(reg - 0x90), value);
+        return true;
+    }
+    return false;
+}
+
+inline void VcdLo(uint32_t value) {
+    if (VcdLoInto(g_hleGxState.vtxDesc, value)) {
+        g_hleGxState.InvalidateVtxLayoutHash();
+    }
+}
+
+inline void VcdHi(uint32_t value) {
+    if (VcdHiInto(g_hleGxState.vtxDesc, value)) {
+        g_hleGxState.InvalidateVtxLayoutHash();
+    }
+}
+
+inline void VatA(uint8_t fmt, uint32_t value) {
+    if (VatAInto(g_hleGxState.vtxAttrFmt, fmt, value)) {
+        g_hleGxState.InvalidateVtxLayoutHash();
+    }
+}
+
+inline void VatB(uint8_t fmt, uint32_t value) {
+    if (VatBInto(g_hleGxState.vtxAttrFmt, fmt, value)) {
+        g_hleGxState.InvalidateVtxLayoutHash();
+    }
+}
+
+inline void VatC(uint8_t fmt, uint32_t value) {
+    if (VatCInto(g_hleGxState.vtxAttrFmt, fmt, value)) {
         g_hleGxState.InvalidateVtxLayoutHash();
     }
 }

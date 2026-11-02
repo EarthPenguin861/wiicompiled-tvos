@@ -1,6 +1,7 @@
 #include "gx_internal.h"
 #include "gx_stream_common.h"
 #include "gx_cp_decode.h"
+#include "gx_vtx_mirror.h"
 #include "isa/big_endian.h"
 
 #include <cstdlib>
@@ -1297,6 +1298,8 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
     if (nbytes == 0 || listAddr == 0) return;
     // List bytes and the arrays it indexes are GPU-side reads, so they are read when the worker runs.
     if (GxWorker::ShouldDefer()) {
+        // Lists load CP vertex layout registers; the game-thread mirror does not follow them.
+        GxVtxMirror::Invalidate();
         EnsureAuroraFrameActive();
         GxWorker::Submit([=] { GX__CallDisplayList_80172f64(listAddr, nbytes); });
         return;

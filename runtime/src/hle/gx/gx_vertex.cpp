@@ -1,6 +1,7 @@
 // gx_vertex.cpp - Vertex Descriptor and Attribute Functions
 #include "gx_internal.h"
 #include "gx_stream_common.h"
+#include "gx_vtx_mirror.h"
 #include "fiber_manager.h"
 #include "guest_interrupt_context.h"
 #include "runtime_log.h"
@@ -42,7 +43,12 @@ bool ApiVtxArray(uint32_t attr, uint32_t& base, uint32_t& stride) {
 // ============================================================================
 
 extern "C" void GX__ClearVtxDesc_8016dc34() {
-    GX_DEFER_CALL0(GX__ClearVtxDesc_8016dc34);
+    if (GxWorker::ShouldDefer()) {
+        GxVtxMirror::OnClearVtxDesc();
+        GxWorker::Submit([] { GX__ClearVtxDesc_8016dc34(); });
+        return;
+    }
+    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate();
     bool changed = false;
     for(int i=0; i<26; ++i){
         changed |= g_hleGxState.vtxDesc[i] != GX_NONE;
@@ -55,7 +61,12 @@ extern "C" void GX__ClearVtxDesc_8016dc34() {
 PPC_NATIVE_OVERRIDE_VOID(8016dc34, GX__ClearVtxDesc_8016dc34, (), ());
 
 extern "C" void GX__SetVtxDesc_8016d3a4(uint32_t a, uint32_t t) {
-    GX_DEFER_CALL(GX__SetVtxDesc_8016d3a4, a, t);
+    if (GxWorker::ShouldDefer()) {
+        GxVtxMirror::OnSetVtxDesc(a, t);
+        GxWorker::Submit([=] { GX__SetVtxDesc_8016d3a4(a, t); });
+        return;
+    }
+    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate();
     const uint32_t attr = CanonicalVtxAttr(a);
     if(attr>=26||attr==GX_VA_NULL) return;
     const GXAttrType oldType = g_hleGxState.vtxDesc[attr];
@@ -78,6 +89,11 @@ extern "C" void GX__SetVtxDescv_8016d608(uint32_t la) {
         list.push_back({a, Memory::Read32(p+4)});
         p+=8;
     }
+    if (GxWorker::ShouldDefer()) {
+        for (const auto& [a, t] : list) GxVtxMirror::OnSetVtxDesc(a, t);
+    } else if (!GxWorker::OnWorker()) {
+        GxVtxMirror::Invalidate();
+    }
     GxWorker::Run([list = std::move(list)] {
         for (const auto& [a, t] : list) GX__SetVtxDesc_8016d3a4(a, t);
     });
@@ -86,9 +102,23 @@ PPC_NATIVE_OVERRIDE_VOID(8016d608, GX__SetVtxDescv_8016d608, (uint32_t la), (la)
 
 // Display lists can change the vertex layout, so answer from the state the worker has applied.
 extern "C" void GX__GetVtxDesc_8016d9f0(uint32_t a, uint32_t tp) {
-    GX_SYNC_INLINE();
-    GXAttrType type = GX_NONE;
     const uint32_t attr = CanonicalVtxAttr(a);
+    // Recording for the GX worker: answer from the game-thread mirror when it is following the
+    // stream (gx_vtx_mirror.h), instead of draining the worker for every query.
+    const bool recording = GxWorker::ShouldDefer();
+    if (recording && GxVtxMirror::Usable()) {
+        const GXAttrType type = (attr < GX_VA_MAX_ATTR && attr != GX_VA_NULL) ? GxVtxMirror::Desc(attr) : GX_NONE;
+        GxVtxMirror::VerifyDesc(a, type);
+        if (tp) {
+            Memory::Write32(tp, static_cast<uint32_t>(type));
+        }
+        return;
+    }
+    GX_SYNC_INLINE();
+    if (recording) {
+        GxVtxMirror::ReloadFromWorkerState();
+    }
+    GXAttrType type = GX_NONE;
     if (attr < GX_VA_MAX_ATTR && attr != GX_VA_NULL) {
         type = g_hleGxState.vtxDesc[attr];
     }
@@ -122,7 +152,12 @@ PPC_NATIVE_OVERRIDE_VOID(8016dba4, GX__GetVtxDescv_8016dba4, (uint32_t la), (la)
 // ============================================================================
 
 extern "C" void GX__SetVtxAttrFmt_8016dc68(uint32_t vf, uint32_t a, uint32_t c, uint32_t t, uint32_t fr) {
-    GX_DEFER_CALL(GX__SetVtxAttrFmt_8016dc68, vf, a, c, t, fr);
+    if (GxWorker::ShouldDefer()) {
+        GxVtxMirror::OnSetVtxAttrFmt(vf, a, c, t, fr);
+        GxWorker::Submit([=] { GX__SetVtxAttrFmt_8016dc68(vf, a, c, t, fr); });
+        return;
+    }
+    if (!GxWorker::OnWorker()) GxVtxMirror::Invalidate();
     const uint32_t attr = CanonicalVtxAttr(a);
     if(vf<8&&attr<26){
         const VtxAttrFmt oldFmt = g_hleGxState.vtxAttrFmt[vf][attr];
@@ -153,6 +188,11 @@ extern "C" void GX__SetVtxAttrFmtv_8016de08(uint32_t vf, uint32_t la) {
         list.push_back({a, Memory::Read32(p+4), Memory::Read32(p+8), Memory::Read8(p+12)});
         p+=16;
     }
+    if (GxWorker::ShouldDefer()) {
+        for (const auto& [a, c, t, fr] : list) GxVtxMirror::OnSetVtxAttrFmt(vf, a, c, t, fr);
+    } else if (!GxWorker::OnWorker()) {
+        GxVtxMirror::Invalidate();
+    }
     GxWorker::Run([vf, list = std::move(list)] {
         for (const auto& [a, c, t, fr] : list) GX__SetVtxAttrFmt_8016dc68(vf, a, c, t, fr);
     });
@@ -160,11 +200,21 @@ extern "C" void GX__SetVtxAttrFmtv_8016de08(uint32_t vf, uint32_t la) {
 PPC_NATIVE_OVERRIDE_VOID(8016de08, GX__SetVtxAttrFmtv_8016de08, (uint32_t vf, uint32_t la), (vf, la));
 
 extern "C" void GX__GetVtxAttrFmt_8016e04c(uint32_t vf, uint32_t a, uint32_t cp, uint32_t tp, uint32_t fp) {
-    GX_SYNC_INLINE();
     VtxAttrFmt fmt{};
     const uint32_t attr = CanonicalVtxAttr(a);
-    if (vf < 8 && attr < GX_VA_MAX_ATTR && attr != GX_VA_NULL) {
-        fmt = g_hleGxState.vtxAttrFmt[vf][attr];
+    const bool recording = GxWorker::ShouldDefer();
+    std::optional<GxWorker::InlineScope> inlineScope;
+    if (recording && GxVtxMirror::Usable()) {
+        fmt = GxVtxMirror::Fmt(vf, a);
+        GxVtxMirror::VerifyFmt(vf, a, fmt);
+    } else {
+        inlineScope.emplace();
+        if (recording) {
+            GxVtxMirror::ReloadFromWorkerState();
+        }
+        if (vf < 8 && attr < GX_VA_MAX_ATTR && attr != GX_VA_NULL) {
+            fmt = g_hleGxState.vtxAttrFmt[vf][attr];
+        }
     }
     if (cp) {
         Memory::Write32(cp, static_cast<uint32_t>(fmt.cnt));
@@ -319,7 +369,11 @@ extern "C" void GX__Begin_8016f0f0(uint32_t t, uint32_t vf, uint32_t nv) {
         return;
     }
     ServiceDeferredTimingDuringGxWork();
-    GX_DEFER_CALL(GxBeginImpl, t, vf, nv);
+    if (GxWorker::ShouldDefer()) {
+        GxVtxMirror::OnBegin(vf, nv);
+        GxWorker::Submit([=] { GxBeginImpl(t, vf, nv); });
+        return;
+    }
     GxBeginImpl(t, vf, nv);
 }
 
@@ -333,7 +387,12 @@ static void GxBeginImpl(uint32_t t, uint32_t vf, uint32_t nv) {
 PPC_NATIVE_OVERRIDE_VOID(8016f0f0, GX__Begin_8016f0f0, (uint32_t t, uint32_t vf, uint32_t nv), (t, vf, nv));
 
 extern "C" void GX__End_80044b30() {
-    GX_DEFER_CALL0(GX__End_80044b30); g_hleGxState.inBegin=false; GXEnd(); }
+    if (GxWorker::ShouldDefer()) {
+        GxVtxMirror::OnEnd();
+        GxWorker::Submit([] { GX__End_80044b30(); });
+        return;
+    }
+    g_hleGxState.inBegin=false; GXEnd(); }
 PPC_NATIVE_OVERRIDE_VOID(80044b30, GX__End_80044b30, (), ());
 
 extern "C" void GX__End_80048c30() { GX__End_80044b30(); }
@@ -341,6 +400,7 @@ PPC_NATIVE_OVERRIDE_VOID(80048c30, GX__End_80048c30, (), ());
 
 extern "C" void GX__DrawSphere_80172a30(uint32_t numMajor, uint32_t numMinor) {
     if (GxWorker::ShouldDefer()) {
+        GxVtxMirror::Invalidate();
         EnsureAuroraFrameActive();
         GxWorker::Submit([=] { GX__DrawSphere_80172a30(numMajor, numMinor); });
         return;

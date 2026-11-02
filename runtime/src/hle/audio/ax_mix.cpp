@@ -29,6 +29,10 @@
 #include <string>
 #include <thread>
 
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
+
 namespace AxDspHle {
 namespace {
 
@@ -1369,6 +1373,12 @@ private:
 
     void MixWorkerMain() {
         t_onMixWorker = true;
+#if defined(__APPLE__)
+        // The guest joins this mix before it can observe it, so it is game-thread work done in
+        // parallel; keep it in the game thread's QoS class instead of the std::thread default.
+        pthread_setname_np("AX mix worker");
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
         for (;;) {
             {
                 std::unique_lock<std::mutex> lock(m_mixMutex);

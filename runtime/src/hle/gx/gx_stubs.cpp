@@ -1,4 +1,5 @@
 #include "gx_internal.h"
+#include "gx_vtx_mirror.h"
 #include "runtime_log.h"
 
 extern "C" void __GXSetSUTexRegs();
@@ -10,6 +11,7 @@ extern "C" void __GXSetSUTexRegs();
 static void FifoWrite(u32 val, uint32_t sizeBytes) {
     if (GxWorker::ShouldDefer()) {
         EnsureAuroraFrameForFifo();
+        GxVtxMirror::OnFifoWrite(val, sizeBytes);
         GxWorker::FifoWrite(val, sizeBytes);
         return;
     }
