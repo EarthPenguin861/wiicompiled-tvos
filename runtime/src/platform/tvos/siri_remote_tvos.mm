@@ -57,9 +57,12 @@ void Poll(Sample& sample) noexcept {
                 motion.valueChangedHandler = ^(GCMotion*) {
                 };
             }
-            std::fprintf(stderr, "[siri-remote] remote %s: gravity+acceleration %d, manual activation %d, active %d\n",
-                    remote.vendorName.UTF8String ?: "?", motion.hasGravityAndUserAcceleration ? 1 : 0,
-                    motion.sensorsRequireManualActivation ? 1 : 0, motion.sensorsActive ? 1 : 0);
+            std::fprintf(stderr,
+                         "[siri-remote] remote %s: gravity+acceleration %d, rotation rate %d, attitude %d, "
+                         "manual activation %d, active %d\n",
+                         remote.vendorName.UTF8String ?: "?", motion.hasGravityAndUserAcceleration ? 1 : 0,
+                         motion.hasRotationRate ? 1 : 0, motion.hasAttitude ? 1 : 0,
+                         motion.sensorsRequireManualActivation ? 1 : 0, motion.sensorsActive ? 1 : 0);
             configured = remote;
         }
         sample.remote = true;
@@ -71,6 +74,13 @@ void Poll(Sample& sample) noexcept {
         sample.userAcceleration[0] = static_cast<float>(user.x);
         sample.userAcceleration[1] = static_cast<float>(user.y);
         sample.userAcceleration[2] = static_cast<float>(user.z);
+        if (motion.hasRotationRate) {
+            const GCRotationRate rate = motion.rotationRate;
+            sample.hasRotationRate = true;
+            sample.rotationRate[0] = static_cast<float>(rate.x);
+            sample.rotationRate[1] = static_cast<float>(rate.y);
+            sample.rotationRate[2] = static_cast<float>(rate.z);
+        }
         sample.click = pad.buttonA.isPressed;
         sample.playPause = pad.buttonX.isPressed;
         sample.menu = pad.buttonMenu.isPressed;

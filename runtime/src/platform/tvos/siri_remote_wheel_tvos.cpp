@@ -279,17 +279,30 @@ void ApplyWheel(PADStatus& pad, const Sample& sample, RaceStage stage, const Set
 } // namespace
 
 bool Driving() noexcept {
-    return g_state.driving;
+    return g_state.driving || WiimoteDriving();
 }
 
 bool OwnsMenuButton() noexcept {
-    return g_state.remote;
+    return g_state.remote || WiimotePresent();
+}
+
+int RaceStageNow() noexcept {
+    try {
+        const uint32_t raceinfo = Memory::Read32(MKW_GADDR(809BD730));
+        if (raceinfo == 0) {
+            return -1;
+        }
+        return static_cast<int32_t>(Memory::Read32(raceinfo + 0x28));
+    } catch (...) {
+        return -1;
+    }
 }
 
 void Apply(PADStatus* statuses) noexcept {
     const Settings& settings = GetSettings();
     g_state.driving = false;
-    if (statuses == nullptr || !settings.enabled) {
+    if (statuses == nullptr || !settings.enabled || WiimoteMode()) {
+        // In Wii Remote mode the remote is on the Bluetooth stack instead (siri_wiimote_tvos.cpp).
         g_state.remote = false;
         return;
     }

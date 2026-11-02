@@ -180,8 +180,9 @@ Things to know:
   sensors; later remotes have none) also plays the game:
   - **Menus:** swipe to move (one step per swipe), click to select (A), Menu to go back (B). These
     presses are added to player 1, so a connected controller keeps working beside it.
-  - **Races:** hold it sideways like a Wii Remote in a Wii Wheel, face toward you, and **click
-    once to take the wheel** (a remote lying on its side never takes over). It then drives player
+  - Held sideways, swipes follow the TV (a swipe toward the TV's right is Right).
+  - **Races:** hold it sideways like a Wii Remote in a Wii Wheel (face toward you or tilted back)
+    and **click once to take the wheel** (a remote lying on its side never takes over). It then drives player
     1, even with a controller connected, until you hold it upright or lay it flat:
 
     | Remote | In the race |
@@ -200,7 +201,18 @@ Things to know:
     of tilt for full lock, default 40), `MKW_SIRI_REMOTE_DEADZONE` (default 4),
     `MKW_SIRI_REMOTE_SHAKE` (g, default 1.3) and `MKW_SIRI_REMOTE_INVERT=1` tune it
     (`runtime/src/platform/tvos/siri_remote_wheel_tvos.cpp`).
-- **Wii Remotes are not supported:** tvOS only lets apps use controllers the system manages
+  - **Wii Remote mode** (experimental): `siri_remote = "wiimote"` under `[controller]` in
+    Config.toml (or `MKW_SIRI_REMOTE=wiimote`) makes the remote a virtual Wii Remote on the game's
+    own Bluetooth stack instead of player 1's GameCube controller. Held upright it points: tilt it
+    up and down to move the pointer vertically, twist it left and right to move it sideways (or
+    turn it, when the remote reports a gyroscope); click = A, Menu = B, swipe = +Control Pad.
+    Held sideways with the touch surface on the left (or right; it is turned round for the game)
+    it is a Wii Wheel: the game steers and does tricks from its own motion sensing, 2 is held
+    once the race has started, click = 1 (brake), a finger on the surface = B (drift), Play/Pause
+    = +Control Pad (item), Menu = + (pause). `MKW_SIRI_POINTER_INVERT_X=1` /
+    `MKW_SIRI_POINTER_INVERT_Y=1` flip the pointer and `MKW_SIRI_REMOTE_INVERT=1` the tilt
+    (`runtime/src/platform/tvos/siri_wiimote_tvos.cpp`).
+- **Real Wii Remotes are not supported:** tvOS only lets apps use controllers the system manages
   through the GameController framework.
 
 ## Where the app keeps its data

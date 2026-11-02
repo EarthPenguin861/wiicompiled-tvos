@@ -71,6 +71,9 @@ struct RuntimeUserConfig {
     std::optional<int32_t> wiiIrSensitivity;
     std::optional<int32_t> wiiSpeakerVolume;
     std::optional<bool> wiiRumble;
+    // Apple TV: what the first-generation Siri Remote is to the game, "gamecube" (buttons and a
+    // tilt wheel on GameCube port 1) or "wiimote" (a virtual Wii Remote with a tilt pointer).
+    std::optional<std::string> siriRemote;
     // Outside a Steam launch, ask a running Steam client for a game controller layout while
     // the window has focus instead of its desktop one (buttons bound to mouse and keyboard).
     std::optional<bool> steamInputOverride;
@@ -497,6 +500,7 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
         config.wiiSpeakerVolume = *value;
     }
     config.wiiRumble = FindConfigValue<bool>(document, "controller", "wii_rumble");
+    config.siriRemote = FindConfigValue<std::string>(document, "controller", "siri_remote");
     config.steamInputOverride = FindConfigValue<bool>(document, "controller", "steam_input_override");
     if (const auto value = FindConfigUint(document, "controller", "steam_input_app_id"); value && *value != 0) {
         config.steamInputAppId = *value;
@@ -893,6 +897,11 @@ inline bool GxWorkerEnabled(bool fallback = true) {
 // Whether background music should duck automatically for other media playback.
 inline bool AttenuateMusicWhenMediaPlays(bool fallback = false) {
     return Get().attenuateMusicWhenMediaPlays.value_or(fallback);
+}
+
+// Apple TV: "gamecube" or "wiimote" (see RuntimeUserConfig::siriRemote); empty when not set.
+inline std::string SiriRemoteMode(std::string fallback = "") {
+    return Get().siriRemote.value_or(std::move(fallback));
 }
 
 // Bluetooth Wii Remotes. Read once before SDL's joystick subsystem comes up, so a

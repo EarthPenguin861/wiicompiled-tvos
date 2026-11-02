@@ -1,5 +1,10 @@
 #include "wiimote_host.h"
 
+#include "platform/apple_target.h"
+#if MKW_HOST_TVOS
+#include "platform/siri_remote.h"
+#endif
+
 #include "input_bindings.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
@@ -798,6 +803,12 @@ void Shutdown() {
 }
 
 Bluetooth::RemoteHost& Host() {
+#if MKW_HOST_TVOS
+    // Apple TV has no Bluetooth Wii Remotes; in Wii Remote mode the Siri Remote is one.
+    if (Bluetooth::RemoteHost* siriRemote = SiriRemote::WiimoteHost()) {
+        return *siriRemote;
+    }
+#endif
     return TheManager();
 }
 
