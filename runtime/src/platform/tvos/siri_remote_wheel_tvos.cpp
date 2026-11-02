@@ -189,8 +189,15 @@ void ApplyMenuButtons(PADStatus& pad, const Sample& sample, uint16_t menuButton)
             pad.analogB = 255;
         }
     }
-    if (buttons != 0) {
-        pad.button |= buttons;
+    pad.button |= buttons;
+}
+
+// While a remote is connected, port 1 always reads as a connected controller. With nothing else
+// there it would otherwise read as unplugged between presses, and the game stops for
+// "communication interrupted" every time the port drops out.
+void KeepConnected(PADStatus& pad) noexcept {
+    if (pad.err != PAD_ERR_NONE) {
+        std::memset(&pad, 0, sizeof(pad));
         pad.err = PAD_ERR_NONE;
     }
 }
@@ -271,6 +278,9 @@ void Apply(PADStatus* statuses) noexcept {
     g_state.previousMenu = sample.menu;
     if (!sample.menu) {
         g_state.menuConsumed = false;
+    }
+    if (sample.remote) {
+        KeepConnected(statuses[0]);
     }
     // The settings bar, a prompt or the startup screen own the input while they are open.
     if (!sample.remote || InputBindings::InputBlocked()) {
