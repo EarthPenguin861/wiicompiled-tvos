@@ -235,6 +235,39 @@ for the app, use it to back up your saves and to collect logs for bug reports.
 The game files themselves are read from `WiiCompiled.app/DATA`. Setting `paths.dvd_root` in
 `Config.toml` still overrides that location.
 
+### Game files and save backups on a home server
+
+A computer on the home network (a Raspberry Pi works) can hold the game files and a copy of the
+saves, which frees most of the 2.6 GB the game data takes and protects saves from a purge:
+
+1. Copy the extracted disc's `files/` folder to the server, then run `Launcher/tvos/game_server.py`
+   there (Python 3, standard library only). It reads `~/wiicompiled-tvos/server/games.json`, which
+   maps a game code to its folders, and `~/wiicompiled-tvos/server/token`, a shared secret:
+
+   ```json
+   {"RMCP": {"data": "/home/pi/games/RMCP/files", "saves": "/home/pi/games/RMCP/saves"}}
+   ```
+
+2. Add the server to the device's `Config.toml`:
+
+   ```toml
+   [remote]
+   url = "http://<server address>:8730"
+   token = "<the contents of the token file>"
+   ```
+
+3. Remove the large folders from the device's `DATA/files` (`thp`, `Race`, `sound`, `Scene`). Keep
+   `DATA/sys` and the small folders: the game needs `sys/` before it can reach the server.
+
+At start-up the game merges the server's file list into the disc index; files still on the device
+are used first. Reads go through a 24 MiB in-memory cache with read-ahead. If the server cannot be
+reached, the game keeps retrying a read for about half a minute and then reports a disc read error,
+so the server must be running while you play.
+
+Saves under `NAND/title/00010004` that are missing on the device are downloaded before the game reads
+them, and a save that changed is uploaded once it has been unchanged for five seconds. The server
+keeps the last 50 earlier versions in `saves/history/`.
+
 ## Not supported on tvOS
 
 - **Retro Rewind.** The Retro Rewind product builds, but its pack expects a writable folder (an app
