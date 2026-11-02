@@ -57,16 +57,11 @@ void Poll(Sample& sample) noexcept {
                 motion.valueChangedHandler = ^(GCMotion*) {
                 };
             }
-            // The tvOS 11 flag the 2017 Siri Remote was announced with; the per-feature flags came later.
-            // Asked at run time so the build doesn't depend on the SDK still declaring it.
-            const bool attitudeAndRate =
-                [motion respondsToSelector:NSSelectorFromString(@"hasAttitudeAndRotationRate")] &&
-                [[motion valueForKey:@"hasAttitudeAndRotationRate"] boolValue];
             std::fprintf(stderr,
                          "[siri-remote] remote %s: gravity+acceleration %d, rotation rate %d, attitude %d, "
-                         "attitude+rotation (tvOS 11 flag) %d, manual activation %d, active %d\n",
+                         "manual activation %d, active %d\n",
                          remote.vendorName.UTF8String ?: "?", motion.hasGravityAndUserAcceleration ? 1 : 0,
-                         motion.hasRotationRate ? 1 : 0, motion.hasAttitude ? 1 : 0, attitudeAndRate ? 1 : 0,
+                         motion.hasRotationRate ? 1 : 0, motion.hasAttitude ? 1 : 0,
                          motion.sensorsRequireManualActivation ? 1 : 0, motion.sensorsActive ? 1 : 0);
             configured = remote;
         }
@@ -79,21 +74,12 @@ void Poll(Sample& sample) noexcept {
         sample.userAcceleration[0] = static_cast<float>(user.x);
         sample.userAcceleration[1] = static_cast<float>(user.y);
         sample.userAcceleration[2] = static_cast<float>(user.z);
-        {
-            // Read the gyroscope even when no flag admits to one: a remote that has none reports zeros,
-            // which the pointer treats as "no gyroscope".
+        if (motion.hasRotationRate) {
             const GCRotationRate rate = motion.rotationRate;
+            sample.hasRotationRate = true;
             sample.rotationRate[0] = static_cast<float>(rate.x);
             sample.rotationRate[1] = static_cast<float>(rate.y);
             sample.rotationRate[2] = static_cast<float>(rate.z);
-            const bool moving = rate.x != 0.0 || rate.y != 0.0 || rate.z != 0.0;
-            sample.hasRotationRate = motion.hasRotationRate || moving;
-            static bool reported = false;
-            if (moving && !reported) {
-                reported = true;
-                std::fprintf(stderr, "[siri-remote] gyroscope is live: rotation rate %.3f %.3f %.3f\n", rate.x,
-                             rate.y, rate.z);
-            }
         }
         sample.click = pad.buttonA.isPressed;
         sample.playPause = pad.buttonX.isPressed;

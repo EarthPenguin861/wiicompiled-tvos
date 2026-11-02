@@ -58,15 +58,8 @@ constexpr int kDotHalfSpacing = 100;
 constexpr int kDotSize = 3;
 
 // Pointer reach: this much tilt moves it from the centre to the edge of the screen.
-constexpr float kPitchRangeDegrees = 20.0f;
+constexpr float kPitchRangeDegrees = 22.0f;
 constexpr float kRollRangeDegrees = 30.0f;
-// People point at a TV with the remote's end raised; the centre then follows the hand whenever
-// it tilts past an edge, so any comfortable hold works.
-constexpr float kPitchCentreDegrees = 25.0f;
-// The pointer hides once the remote is turned this far onto its side (|gravity x|, about 65 degrees)
-// and comes back below the second value.
-constexpr float kPointerHideSide = 0.9f;
-constexpr float kPointerShowSide = 0.8f;
 constexpr float kYawRangeDegrees = 25.0f;
 
 // Same sideways test as the GameCube wheel (siri_remote_wheel_tvos.cpp).
@@ -502,12 +495,11 @@ private:
             --m_diagnosticsLeft;
             m_nextDiagnostic = now + std::chrono::seconds(3);
             RT_LOGF("siri-remote",
-                    "wiimote gravity %.2f %.2f %.2f rate %.2f %.2f %.2f pointer %.2f %.2f visible %d "
-                    "sideways %d driving %d stage %d buttons %04x mode %02x camera %d\n",
+                    "wiimote gravity %.2f %.2f %.2f rate %.2f %.2f %.2f pointer %.2f %.2f sideways %d "
+                    "driving %d stage %d buttons %04x mode %02x camera %d\n",
                     sample.gravity[0], sample.gravity[1], sample.gravity[2], sample.rotationRate[0],
-                    sample.rotationRate[1], sample.rotationRate[2], m_pointerX, m_pointerY,
-                    m_pointerVisible ? 1 : 0, m_sideways ? 1 : 0, m_driving ? 1 : 0, stage, m_buttons, m_mode,
-                    CameraOn() ? 1 : 0);
+                    sample.rotationRate[1], sample.rotationRate[2], m_pointerX, m_pointerY, m_sideways ? 1 : 0,
+                    m_driving ? 1 : 0, stage, m_buttons, m_mode, CameraOn() ? 1 : 0);
         }
     }
 
@@ -536,11 +528,7 @@ private:
     }
 
     void UpdatePointer(const Sample& sample, float dt) {
-        // Twisting the wrist is how the pointer moves sideways, so only a remote lying right over on
-        // its side stops pointing; the looser "sideways" test is for the 1 and 2 buttons.
-        const float side = std::fabs(sample.gravity[0]);
-        m_onItsSide = m_onItsSide ? side > kPointerShowSide : side > kPointerHideSide;
-        m_pointerVisible = !m_onItsSide && !m_driving;
+        m_pointerVisible = !m_sideways && !m_driving;
         if (!m_pointerVisible) return;
         const float pitch = std::asin(std::clamp(-sample.gravity[1], -1.0f, 1.0f)) * kRadiansToDegrees;
         float x;
@@ -553,24 +541,16 @@ private:
             x = m_pointerX - sample.rotationRate[2] * dt * kRadiansToDegrees / kYawRangeDegrees;
         } else {
             const float roll = std::asin(std::clamp(sample.gravity[0], -1.0f, 1.0f)) * kRadiansToDegrees;
-            x = Follow(roll, m_rollCentre, kRollRangeDegrees);
+            x = roll / kRollRangeDegrees;
         }
-        float y = Follow(pitch, m_pitchCentre, kPitchRangeDegrees);
+        float y = pitch / kPitchRangeDegrees;
         if (m_invertX) x = -x;
         if (m_invertY) y = -y;
-        x = std::clamp(x, -1.0f, 1.0f);
-        y = std::clamp(y, -1.0f, 1.0f);
+        x = std::clamp(x, -1.15f, 1.15f);
+        y = std::clamp(y, -1.15f, 1.15f);
         // A little smoothing against hand tremor.
         m_pointerX = gyro ? x : m_pointerX + (x - m_pointerX) * 0.5f;
         m_pointerY = m_pointerY + (y - m_pointerY) * 0.5f;
-    }
-
-    // Maps an angle to -1..1 around a centre that is dragged along when the angle passes an edge,
-    // the way a mouse pointer stops at the edge of the screen.
-    static float Follow(float degrees, float& centre, float range) {
-        if (degrees > centre + range) centre = degrees - range;
-        if (degrees < centre - range) centre = degrees + range;
-        return (degrees - centre) / range;
     }
 
     // Swipes are +Control Pad presses in the remote's own frame; the game turns them for a
@@ -637,11 +617,8 @@ private:
     float m_driveSide = -1.0f;
 
     bool m_pointerVisible = false;
-    bool m_onItsSide = false;
     float m_pointerX = 0.0f;
     float m_pointerY = 0.0f;
-    float m_pitchCentre = kPitchCentreDegrees;
-    float m_rollCentre = 0.0f;
     bool m_invertX = false;
     bool m_invertY = false;
     bool m_invertTilt = false;
