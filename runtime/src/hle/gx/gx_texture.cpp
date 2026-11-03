@@ -729,17 +729,11 @@ extern "C" void GX__GetTexObjAll_80170bf8(uint32_t oa, uint32_t dp, uint32_t wp,
 PPC_NATIVE_OVERRIDE_VOID(80170bf8, GX__GetTexObjAll_80170bf8, (uint32_t oa, uint32_t dp, uint32_t wp, uint32_t hp, uint32_t fp, uint32_t wsp, uint32_t wtp, uint32_t mp), (oa, dp, wp, hp, fp, wsp, wtp, mp));
 
 extern "C" void GX__GetTexObjLODAll_80170cbc(uint32_t oa, uint32_t mifp, uint32_t mafp, uint32_t milp, uint32_t malp, uint32_t lbp, uint32_t bcp, uint32_t elp, uint32_t map) {
-    GX_SYNC_INLINE();
-    std::lock_guard<std::mutex> guard(g_texObjMutex);
-    TexObjMeta meta;
-    if (!TryGetOrExtractTexObjMeta(oa, meta)) {
-        RT_LOGF(RT_TAG_GX, "GXGetTexObjLODAll: failed to get metadata for GXTexObj @0x%08X\n", oa);
-        // Return zeros on failure
-        if (mifp) Memory::Write32(mifp, 0); if (mafp) Memory::Write32(mafp, 0); if (milp) Memory::WriteFloat32(milp, 0.0f);
-        if (malp) Memory::WriteFloat32(malp, 0.0f); if (lbp) Memory::WriteFloat32(lbp, 0.0f); if (bcp) Memory::Write8(bcp, 0);
-        if (elp) Memory::Write8(elp, 0); if (map) Memory::Write32(map, 0);
-        return;
-    }
+    // GXInitTexObj* write the guest GXTexObj on the game thread (InitTexObjSplit), so its first two
+    // words already hold the LOD state; read them as the SDK does. Asking the host registry instead
+    // meant draining the GX worker first: in races about once a frame, a few milliseconds each, and
+    // every drain also reset the vertex-state mirror.
+    const TexObjMeta meta = ExtractTexObjMetaFromGuest(oa);
     if (mifp) Memory::Write32(mifp, meta.minFilter); if (mafp) Memory::Write32(mafp, meta.magFilter); if (milp) Memory::WriteFloat32(milp, meta.minLod); if (malp) Memory::WriteFloat32(malp, meta.maxLod); if (lbp) Memory::WriteFloat32(lbp, meta.lodBias); if (bcp) Memory::Write8(bcp, meta.biasClamp ? 1 : 0); if (elp) Memory::Write8(elp, meta.edgeLod ? 1 : 0); if (map) Memory::Write32(map, meta.maxAniso);
 }
 PPC_NATIVE_OVERRIDE_VOID(80170cbc, GX__GetTexObjLODAll_80170cbc, (uint32_t oa, uint32_t mifp, uint32_t mafp, uint32_t milp, uint32_t malp, uint32_t lbp, uint32_t bcp, uint32_t elp, uint32_t map), (oa, mifp, mafp, milp, malp, lbp, bcp, elp, map));
