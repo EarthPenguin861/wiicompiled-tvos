@@ -175,7 +175,7 @@ Things to know:
 - **Siri Remote Menu** during play opens the exit prompt (the desktop's Escape), except with a
   first-generation remote (below), where Menu is the game's Back. The **TV** button returns to
   the Home screen as usual.
-- Later Siri Remotes never take a player slot. Their arrows and Select reach the settings bar.
+- The Siri Remote never takes a player slot as a game controller. Its arrows and Select reach the settings bar.
 - **First-generation Siri Remote** (the black one with a glass touch surface, which has motion
   sensors; later remotes have none) also plays the game, as a player of its own: player 1 when no
   controller is connected, otherwise the next free player (with one controller it is player 2), so

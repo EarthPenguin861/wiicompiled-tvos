@@ -233,6 +233,22 @@ index 0000000..29dbd30
 +if (CMAKE_SCRIPT_MODE_FILE AND DEFINED IMGUI_SOURCE_DIR)
 +  aurora_imgui_apply_tvos_patches("${IMGUI_SOURCE_DIR}")
 +endif ()
+diff --git a/lib/gamepad.cpp b/lib/gamepad.cpp
+index c66e2a4..3971be4 100644
+--- a/lib/gamepad.cpp
++++ b/lib/gamepad.cpp
+@@ -417,8 +417,9 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
+     controller.m_index = which;
+     controller.m_vid = SDL_GetGamepadVendor(ctrl);
+     controller.m_pid = SDL_GetGamepadProduct(ctrl);
+-    if (controller.m_vid == 0x05ac /* USB_VENDOR_APPLE */ && controller.m_pid == 3) {
+-      // Ignore Apple TV remote
++    if (controller.m_vid == 0x05ac /* USB_VENDOR_APPLE */ && (controller.m_pid == 3 || controller.m_pid == 4)) {
++      // Ignore Apple TV remotes (pid 4 is the first-generation Siri Remote): the runtime reads
++      // them itself, so they never take a player slot of their own
+       SDL_CloseGamepad(ctrl);
+       return -1;
+     }
 diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
 index afe6328..e5cd0a5 100644
 --- a/lib/gx/fifo.cpp
