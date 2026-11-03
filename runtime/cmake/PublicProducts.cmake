@@ -89,7 +89,7 @@ endfunction()
 
 function(mkw_apply_translated_compile_options target)
     target_compile_options(${target} PRIVATE
-        -O2 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -mllvm -hot-cold-split=true -w -pipe)
+        -O3 ${MKW_TRANSLATED_PPC_FP_OPTIONS} -fno-slp-vectorize -mllvm -hot-cold-split=true -w -pipe)
 endfunction()
 
 # Translated shard TUs are the memory-hungry compiles; everything else in the build is

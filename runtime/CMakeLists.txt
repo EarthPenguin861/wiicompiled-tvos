@@ -259,7 +259,7 @@ set_source_files_properties(${MKW_PPC_SEMANTIC_RUNTIME_SOURCES} PROPERTIES
     COMPILE_OPTIONS "${MKW_TRANSLATED_PPC_FP_OPTIONS}")
 # Match the optimization policy of the translated callers as well as their FP policy.
 set_property(SOURCE "${CMAKE_CURRENT_LIST_DIR}/src/ppc_quantized.cpp" APPEND PROPERTY
-    COMPILE_OPTIONS -O2 -fno-slp-vectorize)
+    COMPILE_OPTIONS -O3 -fno-slp-vectorize)
 
 # ----------------------------------------------------------------------
 # Third-party: aurora-main (provides SDL3 + GPU backends)
