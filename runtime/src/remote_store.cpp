@@ -54,9 +54,30 @@ constexpr int kPrefetchThreads = 2;
 constexpr int kConnectTimeoutMs = 3000;
 constexpr int kDataTimeoutMs = 10000;
 constexpr int kManifestTimeoutMs = 8000;
-// The saves the server keeps, relative to the NAND root: every title's save data.
-constexpr std::string_view kSaveScope = "title/00010004";
+// A disc read keeps retrying a piece for this long before it reports a read error.
+constexpr auto kGiveUpAfter = std::chrono::seconds(30);
 constexpr auto kSaveScanInterval = std::chrono::seconds(5);
+
+// The saves the server keeps for a game, relative to the NAND root: that title's own folder,
+// title/00010004/<game code as hex>/ ("RMCP" -> 524d4350).
+std::string SaveScope(const std::string& gameCode) {
+    std::string scope = "title/00010004/";
+    char hex[3];
+    for (const unsigned char c : gameCode) {
+        std::snprintf(hex, sizeof(hex), "%02x", c);
+        scope += hex;
+    }
+    return scope + "/";
+}
+
+// Scratch files that are never saves: this module's downloads in progress and the NAND layer's
+// write shadows.
+bool IsScratchFile(const std::string& name) {
+    const auto endsWith = [&name](std::string_view suffix) {
+        return name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+    return endsWith(".remote-tmp") || endsWith(".nandsafe.tmp");
+}
 
 struct ServerUrl {
     std::string host;
@@ -398,7 +419,12 @@ std::shared_ptr<Chunk> GetChunk(const std::string& path, uint64_t index, uint64_
         TouchLocked(key);
         EvictLocked();
     } else {
+        // Forget the failed piece, so read-ahead can try it again later; a reader that was
+        // waiting for it fetches it itself.
         chunk->failed = true;
+        if (const auto it = g_chunks.find(key); it != g_chunks.end() && it->second == chunk) {
+            g_chunks.erase(it);
+        }
     }
     g_changed.notify_all();
     return ok ? chunk : nullptr;
@@ -421,7 +447,10 @@ void PrefetchLoop() {
     }
 }
 
-void QueueReadAhead(const std::string& path, uint64_t afterIndex, uint64_t fileSize) {
+// Hands pieces first..last of a file to the background threads. The newest read decides what is
+// needed next: its pieces go to the front, nearest first, ahead of anything left over from earlier
+// reads, and the oldest leftovers are dropped.
+void QueueChunks(const std::string& path, uint64_t first, uint64_t last, uint64_t fileSize) {
     std::lock_guard lock(g_mutex);
     if (!g_prefetcherStarted) {
         g_prefetcherStarted = true;
@@ -429,19 +458,16 @@ void QueueReadAhead(const std::string& path, uint64_t afterIndex, uint64_t fileS
             std::thread(PrefetchLoop).detach();
         }
     }
-    // The newest read decides what is needed next: queue its pieces nearest first, ahead of
-    // anything left over from earlier reads, and drop the oldest leftovers.
     std::deque<std::pair<std::string, uint64_t>> wanted;
-    for (uint64_t i = 1; i <= kReadAheadChunks; ++i) {
-        const uint64_t index = afterIndex + i;
-        if (index * kChunkBytes >= fileSize) break;
+    for (uint64_t index = first; index <= last && index * kChunkBytes < fileSize; ++index) {
         if (g_chunks.count(ChunkKey(path, index)) != 0) continue;
         wanted.emplace_back(path, index);
     }
+    const size_t keep = std::max<size_t>(wanted.size(), 2 * kReadAheadChunks);
     for (auto& job : g_prefetch) {
         if (std::find(wanted.begin(), wanted.end(), job) == wanted.end()) wanted.push_back(std::move(job));
     }
-    while (wanted.size() > 2 * kReadAheadChunks) wanted.pop_back();
+    while (wanted.size() > keep) wanted.pop_back();
     g_prefetch = std::move(wanted);
     g_changed.notify_all();
 }
@@ -504,19 +530,19 @@ struct SaveState {
     bool operator!=(const SaveState& other) const { return !(*this == other); }
 };
 
-void SaveSyncLoop(fs::path nandRoot, std::string gameCode, std::map<std::string, std::string> serverHashes) {
+void SaveSyncLoop(fs::path nandRoot, std::string gameCode, std::string saveScope,
+                  std::map<std::string, std::string> serverHashes) {
     std::map<std::string, SaveState> previousScan;
     std::map<std::string, SaveState> uploaded;
     for (;;) {
         std::this_thread::sleep_for(kSaveScanInterval);
         std::map<std::string, SaveState> scan;
         std::error_code ec;
-        const fs::path scope = nandRoot / fs::path(std::string(kSaveScope));
+        const fs::path scope = nandRoot / fs::path(saveScope);
         for (fs::recursive_directory_iterator it(scope, ec), end; !ec && it != end; it.increment(ec)) {
             std::error_code entryEc;
             if (!it->is_regular_file(entryEc) || entryEc) continue;
-            const std::string name = it->path().filename().string();
-            if (name.size() > 11 && name.compare(name.size() - 11, 11, ".remote-tmp") == 0) continue;
+            if (IsScratchFile(it->path().filename().string())) continue;
             SaveState state{it->file_size(entryEc), it->last_write_time(entryEc)};
             if (entryEc) continue;
             const std::string relative = fs::relative(it->path(), nandRoot, entryEc).generic_string();
@@ -625,19 +651,31 @@ bool ReadDiscRange(const fs::path& hostPath, uint64_t offset, uint32_t length, s
         return false;
     }
     std::vector<uint8_t> staged(length);
+    if (length == 0) {
+        destination = std::move(staged);
+        return true;
+    }
+    const uint64_t firstIndex = offset / kChunkBytes;
+    const uint64_t lastIndex = (offset + length - 1) / kChunkBytes;
+    // The background threads fetch the rest of this read, and the read-ahead after it, while this
+    // thread fetches the first piece.
+    QueueChunks(path, firstIndex + 1, lastIndex + kReadAheadChunks, fileSize);
     uint64_t done = 0;
-    uint64_t lastIndex = offset / kChunkBytes;
     while (done < length) {
         const uint64_t position = offset + done;
         const uint64_t index = position / kChunkBytes;
+        // The game cannot go on without the data: keep trying, for half a minute at most.
+        const auto giveUp = std::chrono::steady_clock::now() + kGiveUpAfter;
+        auto delay = std::chrono::milliseconds(250);
         std::shared_ptr<Chunk> chunk;
-        // The game cannot go on without the data: keep trying for about half a minute.
-        static constexpr int kRetryDelaysMs[] = {0, 250, 500, 1000, 2000, 4000, 8000, 15000};
-        for (const int delay : kRetryDelaysMs) {
-            if (delay) std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        for (;;) {
             chunk = GetChunk(path, index, fileSize, error);
             if (chunk) break;
             RT_LOGF("remote", "reading %s from %s failed: %s\n", path.c_str(), ServerText().c_str(), error.c_str());
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= giveUp) break;
+            std::this_thread::sleep_for(std::min<std::chrono::steady_clock::duration>(delay, giveUp - now));
+            delay = std::min(delay * 2, std::chrono::milliseconds(4000));
         }
         if (!chunk) {
             error = "cannot reach the game server at " + ServerText() + " (" + error + ")";
@@ -647,9 +685,8 @@ bool ReadDiscRange(const fs::path& hostPath, uint64_t offset, uint32_t length, s
         const uint64_t take = std::min<uint64_t>(length - done, chunk->data.size() - inChunk);
         std::memcpy(staged.data() + done, chunk->data.data() + inChunk, take);
         done += take;
-        lastIndex = index;
     }
-    QueueReadAhead(path, lastIndex, fileSize);
+    QueueChunks(path, lastIndex + 1, lastIndex + kReadAheadChunks, fileSize);
     destination = std::move(staged);
     return true;
 }
@@ -658,6 +695,7 @@ void StartSaveSync(const fs::path& nandRoot, const std::string& gameCode) {
     static bool started = false;
     if (started || !Enabled()) return;
     started = true;
+    const std::string saveScope = SaveScope(gameCode);
 
     // Restore what the device lost. A save that exists here is the one the player last used, so
     // it is never replaced; the server keeps the history if that ever needs undoing by hand.
@@ -683,7 +721,10 @@ void StartSaveSync(const fs::path& nandRoot, const std::string& gameCode) {
         const uint64_t size = std::strtoull(line.c_str(), nullptr, 10);
         const std::string hash = line.substr(tab1 + 1, tab2 - tab1 - 1);
         const std::string relative = line.substr(tab2 + 1);
-        if (!SafeRelativePath(relative) || relative.compare(0, kSaveScope.size(), kSaveScope) != 0) continue;
+        if (!SafeRelativePath(relative) || relative.compare(0, saveScope.size(), saveScope) != 0 ||
+            IsScratchFile(fs::path(relative).filename().string())) {
+            continue;
+        }
         serverHashes[relative] = hash;
         const fs::path local = nandRoot / fs::path(relative);
         std::error_code ec;
@@ -702,7 +743,7 @@ void StartSaveSync(const fs::path& nandRoot, const std::string& gameCode) {
     }
     RT_LOGF("remote", "save backup on %s: %zu file(s) there, %d restored to this device\n", ServerText().c_str(),
             serverHashes.size(), restored);
-    std::thread(SaveSyncLoop, nandRoot, gameCode, std::move(serverHashes)).detach();
+    std::thread(SaveSyncLoop, nandRoot, gameCode, saveScope, std::move(serverHashes)).detach();
 }
 
 } // namespace RemoteStore

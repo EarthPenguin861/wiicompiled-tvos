@@ -109,6 +109,8 @@ struct State {
     bool driving = false;         // it drives its port on this read
     int port = 0;                 // its GameCube port: 0 (port 1) unless a controller is there
     int loggedPort = -1;
+    int portCandidate = -1;       // a different free port seen since portCandidateSince
+    Clock::time_point portCandidateSince{};
     bool suspended = false;       // Menu paused the race; released when it is held upright
     bool previousMenu = false;
     bool previousClick = false;
@@ -203,14 +205,33 @@ uint16_t SwipeButtons(Sample sample) noexcept {
 }
 
 // The remote is a player of its own: port 1 when no controller is connected, otherwise the first
-// port no controller uses, so a controller and the remote play as two players.
+// port no controller uses, so a controller and the remote play as two players. Only an empty port
+// counts; a controller that reports a transfer error for a moment still holds its port.
 int FreePort(const PADStatus* statuses) noexcept {
     for (int i = 0; i < PAD_CHANMAX; ++i) {
-        if (statuses[i].err != PAD_ERR_NONE) {
+        if (statuses[i].err == PAD_ERR_NO_CONTROLLER) {
             return i;
         }
     }
     return 0; // every port has a controller: share port 1
+}
+
+// A different free port must last this long before the remote moves, so a controller that drops
+// its Bluetooth link for a moment (on the results between Grand Prix races, say) keeps its player.
+constexpr auto kPortSettle = std::chrono::milliseconds(1500);
+
+void UpdatePort(const PADStatus* statuses) noexcept {
+    const int free = FreePort(statuses);
+    const auto now = Clock::now();
+    if (free == g_state.port) {
+        g_state.portCandidate = -1;
+    } else if (free != g_state.portCandidate) {
+        g_state.portCandidate = free;
+        g_state.portCandidateSince = now;
+    } else if (now - g_state.portCandidateSince >= kPortSettle) {
+        g_state.port = free;
+        g_state.portCandidate = -1;
+    }
 }
 
 // Menu mode: the remote's presses are added to its port.
@@ -348,7 +369,7 @@ void Apply(PADStatus* statuses) noexcept {
         // the remote to another player.
         const RaceStage stageNow = CurrentRaceStage();
         if (stageNow != RaceStage::Starting && stageNow != RaceStage::Racing) {
-            g_state.port = FreePort(statuses);
+            UpdatePort(statuses);
         }
         if (g_state.port != g_state.loggedPort) {
             g_state.loggedPort = g_state.port;

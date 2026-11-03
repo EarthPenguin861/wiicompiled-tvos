@@ -264,7 +264,7 @@ are used first. Reads go through a 32 MiB in-memory cache that reads 4 MiB ahead
 reached, the game keeps retrying a read for about half a minute and then reports a disc read error,
 so the server must be running while you play.
 
-Saves under `NAND/title/00010004` that are missing on the device are downloaded before the game reads
+Saves under `NAND/title/00010004/<game>` (`524d4350` for RMCP) that are missing on the device are downloaded before the game reads
 them, and a save that changed is uploaded once it has been unchanged for five seconds. The server
 keeps the last 50 earlier versions in `saves/history/`.
 

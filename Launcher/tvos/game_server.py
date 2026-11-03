@@ -17,6 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HOME = os.path.expanduser("~/wiicompiled-tvos/server")
 PORT = 8730
 SAVE_SCOPE = "title/00010004/"
+# Scratch files that are never saves: uploads in progress and the game's NAND write shadows.
+SCRATCH_SUFFIXES = (".upload-tmp", ".remote-tmp", ".nandsafe.tmp")
 HISTORY_KEEP = 50
 MAX_SAVE_BYTES = 64 << 20
 
@@ -50,7 +52,7 @@ def walk(root, skip_dirs=()):
     for base, dirs, files in os.walk(root):
         dirs[:] = sorted(d for d in dirs if os.path.relpath(os.path.join(base, d), root) not in skip_dirs)
         for name in sorted(files):
-            if name.endswith(".upload-tmp"):
+            if name.endswith(SCRATCH_SUFFIXES):
                 continue
             full = os.path.join(base, name)
             yield os.path.relpath(full, root).replace(os.sep, "/"), full
@@ -60,7 +62,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "WiiCompiledServer/1"
 
     def log_message(self, fmt, *args):
-        if not self.path.split("?")[0].split("/")[3:4] == ["data"]:  # disc reads are too chatty
+        # A malformed request line never sets self.path.
+        if not getattr(self, "path", "").split("?")[0].split("/")[3:4] == ["data"]:  # disc reads are too chatty
             sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
 
     def reply(self, status, body=b"", headers=None):
@@ -143,8 +146,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         game, what, rel = routed
         full = safe_join(game["saves"], rel) if what == "save" else None
-        length = int(self.headers.get("Content-Length", "-1"))
-        if not full or not rel.startswith(SAVE_SCOPE) or not 0 <= length <= MAX_SAVE_BYTES:
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            length = -1
+        if (not full or not rel.startswith(SAVE_SCOPE) or rel.endswith(SCRATCH_SUFFIXES)
+                or not 0 <= length <= MAX_SAVE_BYTES):
             self.reply(400, b"bad save upload\n")
             return
         data = self.rfile.read(length)

@@ -810,18 +810,19 @@ static std::string DiscGameCodeText() {
 }
 
 // Disc files this device does not keep are read from the game server ([remote] url), if one is
-// configured. Files present here win, so a partial local copy still works.
-static void RegisterRemoteDiscFiles() {
+// configured. Files present here win, so a partial local copy still works. False when there is no
+// server or it could not be reached.
+static bool RegisterRemoteDiscFiles() {
     if (!RemoteStore::Enabled()) {
-        return;
+        return false;
     }
     std::vector<RemoteStore::ManifestEntry> entries;
     std::string error;
     if (!RemoteStore::FetchManifest(DiscGameCodeText(), entries, error)) {
         RT_LOG(RT_TAG_DVD) << "WARNING: game server " << RemoteStore::ServerText()
                            << " is unavailable (" << error
-                           << "); only the disc files on this device can be read" << std::endl;
-        return;
+                           << "); only the disc files and saves on this device are used" << std::endl;
+        return false;
     }
     size_t added = 0;
     uint64_t bytes = 0;
@@ -838,6 +839,7 @@ static void RegisterRemoteDiscFiles() {
     RT_LOG(RT_TAG_DVD) << "game server " << RemoteStore::ServerText() << ": " << added
                        << " disc file(s), " << (bytes >> 20) << " MiB, read over the network"
                        << std::endl;
+    return true;
 }
 
 // 0x8015EA1C -> DVDInit
@@ -880,10 +882,12 @@ extern "C" void DVDInit_8015EA1C()
     
     // Map "<dvd_root>/files" -> "/"
     ScanDirectory(rootPath / "files", "/");
-    RegisterRemoteDiscFiles();
-    // Bring back saves tvOS deleted with the Caches folder before the game looks for them, and
-    // keep the game server's copy current from here on.
-    RemoteStore::StartSaveSync(RuntimeNandPath::DiscoverNandRootPath(), DiscGameCodeText());
+    if (RegisterRemoteDiscFiles()) {
+        // Bring back saves tvOS deleted with the Caches folder before the game looks for them,
+        // and keep the game server's copy current from here on. Without a reachable server the
+        // NAND is left to be found on first use, as before.
+        RemoteStore::StartSaveSync(RuntimeNandPath::DiscoverNandRootPath(), DiscGameCodeText());
+    }
 
     // Map "<dvd_root>/sys" -> "/sys/" (e.g. main.dol, bi2.bin)
     ScanDirectory(rootPath / "sys", "/sys/");
@@ -1174,14 +1178,14 @@ extern "C" int32_t DVDLowRead_80166330(uint32_t buffer, uint32_t length, uint32_
     }
 
     std::vector<uint8_t> tempBuf;
-    DvdReadContract::HostReadFailure failure;
-    if (!DvdReadContract::ReadExact(readInfo.entry->hostPath,
-                                    readInfo.fileOffset,
-                                    readInfo.readLength,
-                                    tempBuf,
-                                    failure)) {
+    std::string readError;
+    if (!ReadHostRange(readInfo.entry->hostPath,
+                       readInfo.fileOffset,
+                       readInfo.readLength,
+                       tempBuf,
+                       readError)) {
         ReportDvdReadError(HostPathText(readInfo.entry->hostPath), readInfo.fileOffset,
-                           readInfo.readLength, DvdReadContract::Describe(failure));
+                           readInfo.readLength, readError.c_str());
         return finish(false);
     }
 
