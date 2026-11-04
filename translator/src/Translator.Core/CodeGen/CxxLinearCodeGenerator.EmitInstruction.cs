@@ -437,11 +437,7 @@ public sealed partial class CxxLinearCodeGenerator
                         break;
                     }
                     EmitNormalizeGuestCallFloatReturn(call.Target, sb, pad, localPaired, guestAbiProvider);
-                    // An ordinary return: the GPRs the callee is proven to hand back unchanged keep their
-                    // locals. (The state-free arms and LR-continuation resumes above keep the full set.)
-                    AppendReload(sb, pad, usesStateFreeCall
-                        ? boundarySync
-                        : ExcludePreservedGprsFromReload(boundarySync, addr, guestAbiContracts, modOverridableCallTargets));
+                    AppendReload(sb, pad, boundarySync);
                 }
                 else if (IsGuestCallTarget(call.Target))
                 {

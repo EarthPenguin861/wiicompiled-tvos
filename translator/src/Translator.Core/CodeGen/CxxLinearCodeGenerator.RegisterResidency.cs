@@ -372,29 +372,6 @@ public sealed partial class CxxLinearCodeGenerator
     }
 
     /// <summary>
-    /// Drops from a direct call's reload set the GPRs its callee is proven to return with their entry value
-    /// (<see cref="GuestAbiContract.GprPreservedMask"/>), full-fence callees included. Any such register the callee
-    /// touches is in the flush set, so after the call CpuContext holds exactly what this frame's local already
-    /// holds. Not for a mod-overridable callee, whose replacement this proof does not describe.
-    /// </summary>
-    private static ResidencyBoundarySync ExcludePreservedGprsFromReload(
-        ResidencyBoundarySync sync,
-        uint target,
-        IReadOnlyDictionary<uint, GuestAbiContract> guestAbiContracts,
-        IReadOnlySet<uint> modOverridableCallTargets)
-    {
-        if (_activeResidency is null ||
-            modOverridableCallTargets.Contains(target) ||
-            !guestAbiContracts.TryGetValue(target, out var contract) ||
-            contract.GprPreservedMask == 0)
-        {
-            return sync;
-        }
-
-        return sync with { ReloadGprMask = sync.ReloadGprMask & ~contract.GprPreservedMask };
-    }
-
-    /// <summary>
     /// Removes an explicit helper destination register from a helper-effect
     /// reload mask. The destination local holds the helper's return value; the
     /// implicit-context reload must not overwrite it.

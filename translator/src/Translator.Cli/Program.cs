@@ -1006,27 +1006,6 @@ int RunTranslateRecursive(string[] argsTail)
             foreach (var pair in nativeGuestEffects.Contracts)
                 guestAbiContracts[pair.Key] = pair.Value;
 
-            // Nonvolatile GPRs each translated function provably hands back unchanged, so its
-            // callers can keep them in locals across the call. Natives prove nothing here.
-            var nativeTargets = nativeGuestEffects.Contracts.Keys.ToHashSet();
-            var preservedGprs = GuestNonvolatileGprPreservation.Analyze(
-                canonicalGuestFunctions, nativeTargets, guestAbiContracts);
-            var preservingFunctions = 0;
-            var preservedRegisterCount = 0;
-            foreach (var pair in preservedGprs)
-            {
-                if (pair.Value == 0 || nativeTargets.Contains(pair.Key) ||
-                    !guestAbiContracts.TryGetValue(pair.Key, out var preservedContract))
-                    continue;
-                guestAbiContracts[pair.Key] = preservedContract with { GprPreservedMask = pair.Value };
-                preservingFunctions++;
-                preservedRegisterCount += System.Numerics.BitOperations.PopCount(pair.Value);
-            }
-            Console.WriteLine(
-                $"[translator] Proven nonvolatile GPR preservation: {preservingFunctions:N0} function(s), " +
-                $"{preservedRegisterCount:N0} register(s).");
-            LogPhase("nonvolatile GPR preservation");
-
             // Determine the state that is actually consumed after each direct
             // call. Public CpuContext wrappers retain the complete architectural
             // behavior; native internal entries return only this union of
