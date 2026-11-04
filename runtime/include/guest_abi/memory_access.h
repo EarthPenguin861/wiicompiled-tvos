@@ -428,12 +428,11 @@ MKW_MEMORY_FORCE_INLINE bool TryWriteGuestScalar(uint32_t address, T value) {
     // its 4 KiB sub-pages are plain data; MKW's THP buffers share such a page with .text, which
     // used to force ~15% of total CPU through the cold path. The sparse sub-page tier below
     // keeps those stores native while the exact 4 KiB executable guards stay authoritative.
-    if (address > UINT32_MAX - static_cast<uint32_t>(sizeof(T) - 1u)) [[unlikely]]
+    // One offset compare proves the access stays inside its 1 MiB page; it also rules out
+    // wrapping past 0xFFFFFFFF, which is the end of the last page.
+    if ((address & kPageMask) > kPageSize - static_cast<uint32_t>(sizeof(T))) [[unlikely]]
         return false;
     const uint32_t coarsePage = address >> kPageShift;
-    const uint32_t endAddress = address + static_cast<uint32_t>(sizeof(T) - 1u);
-    if ((endAddress >> kPageShift) != coarsePage) [[unlikely]]
-        return false;
     const uintptr_t encodedBias = g_fullWritablePageBias[coarsePage];
     uint8_t* ptr = nullptr;
     if (encodedBias != 0) {
