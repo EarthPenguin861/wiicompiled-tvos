@@ -342,9 +342,9 @@ void SetWaitCallback(void (*callback)()) { g_waitCallback = callback; }
 
 void SetInlineListener(void (*listener)(void* caller) noexcept) { g_inlineListener = listener; }
 
-void BeginInline() {
+void BeginInline(bool changesGxState) {
     if (detail::t_inlineDepth == 0 && !detail::t_onWorker) {
-        if (g_inlineListener != nullptr) {
+        if (changesGxState && g_inlineListener != nullptr) {
             g_inlineListener(__builtin_return_address(0));
         }
         if (Active()) {

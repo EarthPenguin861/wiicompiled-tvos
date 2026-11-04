@@ -85,12 +85,14 @@ void Sync();
 
 // GX entry points run inline on the game thread while inside (after a Sync), for work whose
 // results the guest needs immediately.
-void BeginInline();
+// changesGxState=false is for scopes that only wait for the worker (GXDrawDone): the vertex-state
+// mirror stays valid across them, so the next GXGetVtxDesc needs no sync.
+void BeginInline(bool changesGxState = true);
 void EndInline();
 
 class InlineScope {
 public:
-    InlineScope() { BeginInline(); }
+    explicit InlineScope(bool changesGxState = true) { BeginInline(changesGxState); }
     ~InlineScope() { EndInline(); }
     InlineScope(const InlineScope&) = delete;
     InlineScope& operator=(const InlineScope&) = delete;
@@ -118,3 +120,5 @@ public:
 
 // Runs the rest of the enclosing function on this thread once the worker has caught up.
 #define GX_SYNC_INLINE() GxWorker::InlineScope gxInlineScope_
+// For calls that only wait for the worker and change no GX state on this thread.
+#define GX_SYNC_INLINE_WAIT_ONLY() GxWorker::InlineScope gxInlineScope_{false}
