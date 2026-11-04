@@ -60,6 +60,9 @@ constexpr std::array<Racer, 12> kRacers{{
 
 std::optional<uint32_t> g_course;
 bool g_cpuDriven = false;
+// Local racers, each with its own split-screen view (the VS 1P..4P sections follow each other).
+uint32_t g_localPlayers = 1;
+constexpr uint32_t kMaxLocalPlayers = 4;
 
 uint32_t ParseCourse(std::string_view text) {
     int base = 10;
@@ -85,7 +88,7 @@ void SetUpMenuScenario(uint32_t course) {
         const uint32_t player = scenario + kPlayersOffset + i * kPlayerSize;
         Memory::Write32(player + kPlayerKartOffset, kRacers[i].kart);
         Memory::Write32(player + kPlayerCharacterOffset, kRacers[i].character);
-        Memory::Write32(player + kPlayerTypeOffset, i == 0 ? kPlayerRealLocal : kPlayerCpu);
+        Memory::Write32(player + kPlayerTypeOffset, i < g_localPlayers ? kPlayerRealLocal : kPlayerCpu);
     }
     const uint32_t settings = scenario + kSettingsOffset;
     Memory::Write32(settings + 0x00, course);
@@ -104,7 +107,15 @@ void SetUpMenuScenario(uint32_t course) {
 namespace BootRace {
 
 bool ParseArgument(std::string_view arg) {
-    if (arg == "--race-cpu") {
+    constexpr std::string_view kCpuOption = "--race-cpu";
+    if (arg.starts_with(kCpuOption) && (arg.size() == kCpuOption.size() || arg[kCpuOption.size()] == '=')) {
+        if (arg.size() > kCpuOption.size()) {
+            const std::string_view count = arg.substr(kCpuOption.size() + 1);
+            if (count.size() != 1 || count[0] < '1' || count[0] > static_cast<char>('0' + kMaxLocalPlayers)) {
+                throw std::invalid_argument("--race-cpu expects a local player count from 1 to 4");
+            }
+            g_localPlayers = static_cast<uint32_t>(count[0] - '0');
+        }
         g_cpuDriven = true;
         if (!g_course) {
             g_course = kLuigiCircuit;
@@ -152,8 +163,9 @@ extern "C" void ArgumentParser_Parse_805b9344(CpuContext* ctx) {
         MKW_GUEST_FUNC(8061B490)(ctx);
     }
 
-    RT_LOGF("boot-race", "booting into 1P VS on course 0x%02X%s\n", *g_course, g_cpuDriven ? " (CPU driven)" : "");
-    ctx->gpr[3] = kSectionP1Vs;
+    RT_LOGF("boot-race", "booting into %uP VS on course 0x%02X%s\n", g_localPlayers, *g_course,
+            g_cpuDriven ? " (CPU driven)" : "");
+    ctx->gpr[3] = kSectionP1Vs + (g_localPlayers - 1);
 }
 REGISTER_NATIVE_FUNCTION_AS(0x805B9344, ArgumentParser_Parse_805b9344, "ArgumentParser_Parse_805b9344");
 
