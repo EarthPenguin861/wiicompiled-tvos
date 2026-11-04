@@ -155,11 +155,22 @@ static bool IsDvdDataRoot(const fs::path& path) {
     FailDvd("dvd_root", "DVD data is unavailable", details);
 }
 
+static std::string DiscGameCodeText();
+
 static const fs::path& GetDvdRoot() {
     std::call_once(g_dvdRootOnce, []() {
         const fs::path path = RuntimeConfigFile::ResolvedDvdRoot();
         if (path.empty()) {
             FailDvdRoot("No DVD root is configured");
+        }
+        if (!IsDvdDataRoot(path) && RemoteStore::Enabled()) {
+            // tvOS can delete the local copy with Library/Caches; everything but sys/ already
+            // streams from the game server, so fetch sys/ back and carry on.
+            std::string error;
+            if (!RemoteStore::FetchSystemFiles(DiscGameCodeText(), path, error)) {
+                RT_LOG(RT_TAG_DVD) << "WARNING: could not restore sys/ from the game server: " << error
+                                   << std::endl;
+            }
         }
         if (!IsDvdDataRoot(path)) {
             FailDvdRoot("Configured DVD root is not an extracted DATA directory", path);

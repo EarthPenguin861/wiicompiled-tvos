@@ -106,6 +106,15 @@ struct RuntimeUserConfig {
     std::map<std::string, std::string> controllerExpressions;
 };
 
+#if MKW_HOST_TVOS
+// The last good Config.toml, kept in the app's preferences, which survive tvOS clearing
+// Library/Caches (src/platform/tvos/config_backup_tvos.cpp).
+namespace RuntimeConfigBackup {
+bool Load(std::string& text) noexcept;
+void Save(const std::string& text) noexcept;
+}
+#endif
+
 namespace RuntimeConfigFile {
 
 // Narrow path strings are UTF-8 everywhere in the runtime; string() and the
@@ -278,6 +287,17 @@ inline void EnsureConfigFile() {
     if (ec || std::filesystem::exists(path, ec)) {
         return;
     }
+#if MKW_HOST_TVOS
+    // tvOS deletes Library/Caches when the Apple TV runs low on storage; bring back the last
+    // Config.toml (paths, the game server, settings) rather than starting from the defaults.
+    if (std::string saved; RuntimeConfigBackup::Load(saved)) {
+        if (std::ofstream restored(path, std::ios::binary); restored << saved) {
+            std::cerr << "[runtime-config] restored Config.toml from the app's preferences "
+                         "(tvOS had cleared Library/Caches)" << std::endl;
+            return;
+        }
+    }
+#endif
 
     std::ofstream output(path);
     if (!output) {
@@ -545,6 +565,16 @@ inline RuntimeUserConfig ParseConfig(std::istream& input, std::string sourceName
 inline RuntimeUserConfig LoadConfigFile() {
     EnsureConfigFile();
     std::ifstream file(ResolveConfigPath(), std::ios::binary);
+#if MKW_HOST_TVOS
+    // Keep the preferences copy in step with the file, including edits made to it from outside.
+    if (file) {
+        std::ostringstream text;
+        text << file.rdbuf();
+        RuntimeConfigBackup::Save(text.str());
+        std::istringstream copy(text.str());
+        return ParseConfig(copy, PathToUtf8(ResolveConfigPath()));
+    }
+#endif
     return file ? ParseConfig(file, PathToUtf8(ResolveConfigPath())) : RuntimeUserConfig{};
 }
 
@@ -622,6 +652,11 @@ inline bool WriteSetting(std::string_view section, std::string_view key, std::st
         return false;
     }
     output << *updated;
+#if MKW_HOST_TVOS
+    if (output) {
+        RuntimeConfigBackup::Save(*updated);
+    }
+#endif
     return static_cast<bool>(output);
 }
 

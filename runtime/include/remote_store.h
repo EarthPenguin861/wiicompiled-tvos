@@ -46,6 +46,12 @@ std::string ServerText();
 // reached.
 bool FetchManifest(const std::string& gameCode, std::vector<ManifestEntry>& entries, std::string& error);
 
+// Downloads the disc's sys/ files (fst.bin, boot.bin, ...) into <dvdRoot>/sys and creates
+// <dvdRoot>/files, for a device whose local copy tvOS deleted along with Library/Caches. True when
+// <dvdRoot>/sys/fst.bin exists afterwards. (Protocol: GET /g/<game>/sys-manifest lists
+// "<size>\t<path>" lines; GET /g/<game>/sys/<path> returns a file.)
+bool FetchSystemFiles(const std::string& gameCode, const std::filesystem::path& dvdRoot, std::string& error);
+
 bool IsRemoteHostPath(const std::filesystem::path& hostPath);
 std::filesystem::path MakeRemoteHostPath(const std::string& relativePath);
 

@@ -4,6 +4,9 @@
 Protocol (see runtime/include/remote_store.h), every request carries X-Wii-Token:
   GET  /g/<game>/manifest        "<size>\t<path>\n" per disc file under the game's files/ folder
   GET  /g/<game>/data/<path>     a disc file, honouring "Range: bytes=a-b"
+  GET  /g/<game>/sys-manifest    "<size>	<path>
+" per file of the disc's sys/ folder
+  GET  /g/<game>/sys/<path>      a sys/ file (a device whose local copy tvOS deleted fetches these)
   GET  /g/<game>/save-index      "<size>\t<fnv1a64>\t<path>\n" per save file
   GET  /g/<game>/save/<path>     a save file
   PUT  /g/<game>/save/<path>     store a save file; the previous version moves to history/
@@ -38,6 +41,11 @@ def fnv1a64(path):
             h = ((h ^ byte) * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
     _hash_cache[key] = "%016x" % h
     return _hash_cache[key]
+
+
+def sys_dir(game):
+    # The disc's sys/ folder (fst.bin, boot.bin, ...): "sys" in games.json, else beside files/.
+    return game.get("sys") or os.path.join(os.path.dirname(game["data"].rstrip("/")), "sys")
 
 
 def safe_join(root, rel):
@@ -96,6 +104,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(200, "".join(lines).encode())
         elif what == "data":
             self.send_data(game, rel)
+        elif what == "sys-manifest":
+            lines = ["%d\t%s\n" % (os.path.getsize(full), rel) for rel, full in walk(sys_dir(game))]
+            self.reply(200, "".join(lines).encode())
+        elif what == "sys":
+            full = safe_join(sys_dir(game), rel)
+            if not full or not os.path.isfile(full):
+                self.reply(404, b"no such file\n")
+            else:
+                with open(full, "rb") as f:
+                    self.reply(200, f.read())
         elif what == "save-index":
             os.makedirs(game["saves"], exist_ok=True)
             lines = ["%d\t%s\t%s\n" % (os.path.getsize(full), fnv1a64(full), rel)

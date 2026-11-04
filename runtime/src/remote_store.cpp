@@ -624,6 +624,50 @@ bool FetchManifest(const std::string& gameCode, std::vector<ManifestEntry>& entr
     return true;
 }
 
+bool FetchSystemFiles(const std::string& gameCode, const fs::path& dvdRoot, std::string& error) {
+    if (!Enabled()) {
+        error = "no game server configured";
+        return false;
+    }
+    Response list;
+    if (!Request("GET", GamePath(gameCode, "sys-manifest"), "", nullptr, kManifestTimeoutMs, list, error)) {
+        return false;
+    }
+    if (list.status != 200) {
+        error = "the server answered " + std::to_string(list.status);
+        return false;
+    }
+    const std::string text(list.body.begin(), list.body.end());
+    size_t start = 0;
+    int fetched = 0;
+    while (start < text.size()) {
+        const size_t end = std::min(text.find('\n', start), text.size());
+        const std::string line = text.substr(start, end - start);
+        start = end + 1;
+        const size_t tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        const uint64_t size = std::strtoull(line.c_str(), nullptr, 10);
+        const std::string relative = line.substr(tab + 1);
+        if (!SafeRelativePath(relative)) continue;
+        Response file;
+        if (!Request("GET", GamePath(gameCode, "sys/") + PercentEncodePath(relative), "", nullptr, kDataTimeoutMs,
+                     file, error) ||
+            file.status != 200 || file.body.size() != size) {
+            if (error.empty()) error = "sys/" + relative + " did not download completely";
+            return false;
+        }
+        if (!WriteFileAtomically(dvdRoot / "sys" / fs::path(relative), file.body)) {
+            error = "cannot write sys/" + relative;
+            return false;
+        }
+        ++fetched;
+    }
+    std::error_code ec;
+    fs::create_directories(dvdRoot / "files", ec);
+    RT_LOGF("remote", "downloaded %d disc sys/ file(s) from %s\n", fetched, ServerText().c_str());
+    return fs::is_regular_file(dvdRoot / "sys" / "fst.bin", ec);
+}
+
 bool IsRemoteHostPath(const fs::path& hostPath) {
     const std::string text = hostPath.generic_string();
     return text.compare(0, std::strlen(kHostPrefix), kHostPrefix) == 0;
