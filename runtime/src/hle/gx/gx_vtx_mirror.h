@@ -65,6 +65,10 @@ void OnBegin(uint32_t vtxFmt, uint32_t vertexCount) noexcept;
 void OnEnd() noexcept;
 void OnFifoWrite(uint32_t value, uint32_t sizeBytes) noexcept;
 void OnFifoBurst(const uint8_t* data, uint32_t sizeBytes) noexcept;
+// A display list the game thread hands to the worker (GXCallDisplayList): its bytes are followed
+// like recorded FIFO bytes, so its CP vertex-layout loads keep the mirror current. A list that does
+// not start and end on a packet boundary invalidates the mirror instead.
+void OnCallDisplayList(const uint8_t* data, uint32_t sizeBytes) noexcept;
 
 // Records a worker-side check of an answer given from the mirror.
 void VerifyDesc(uint32_t attr, GXAttrType answered);

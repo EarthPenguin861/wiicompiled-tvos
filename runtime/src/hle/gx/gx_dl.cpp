@@ -1298,8 +1298,14 @@ extern "C" void GX__CallDisplayList_80172f64(uint32_t listAddr, uint32_t nbytes)
     if (nbytes == 0 || listAddr == 0) return;
     // List bytes and the arrays it indexes are GPU-side reads, so they are read when the worker runs.
     if (GxWorker::ShouldDefer()) {
-        // Lists load CP vertex layout registers; the game-thread mirror does not follow them.
-        GxVtxMirror::Invalidate(GxVtxMirror::Reason::DisplayList);
+        // Lists load CP vertex-layout registers: the mirror follows the list's bytes as they are
+        // now (the game, like on hardware, leaves a called list alone until the GPU is done).
+        const uint8_t* mirrorList = nullptr;
+        try {
+            mirrorList = static_cast<const uint8_t*>(GuestToHostPtr(listAddr, nbytes));
+        } catch (...) {
+        }
+        GxVtxMirror::OnCallDisplayList(mirrorList, nbytes);
         EnsureAuroraFrameActive();
         GxWorker::Submit([=] { GX__CallDisplayList_80172f64(listAddr, nbytes); });
         return;

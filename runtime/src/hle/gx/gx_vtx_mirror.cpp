@@ -477,6 +477,21 @@ void OnFifoBurst(const uint8_t* data, uint32_t sizeBytes) noexcept {
     }
 }
 
+void OnCallDisplayList(const uint8_t* data, uint32_t sizeBytes) noexcept {
+    if (!g_mirror.valid) {
+        return;
+    }
+    // GXCallDisplayList runs between packets of the main stream, and a list holds whole packets.
+    if (data == nullptr || g_mirror.packetLength != 0 || g_mirror.skip != 0) {
+        Reset(Reason::DisplayList);
+        return;
+    }
+    Consume(data, sizeBytes);
+    if (g_mirror.valid && (g_mirror.packetLength != 0 || g_mirror.skip != 0)) {
+        Reset(Reason::DisplayList);
+    }
+}
+
 void VerifyDesc(uint32_t attr, GXAttrType answered) {
     GxWorker::Submit([attr, answered] {
         const uint32_t canonical = CanonicalAttr(attr);
