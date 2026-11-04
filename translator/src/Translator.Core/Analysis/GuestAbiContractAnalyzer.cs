@@ -48,6 +48,11 @@ public sealed record GuestAbiContract(
     public bool DefinitelyWritesFpscr { get; init; }
     public byte GqrDefiniteWriteMask { get; init; }
     public byte HidDefiniteWriteMask { get; init; }
+    /// <summary>
+    /// Nonvolatile GPRs the callee is proven to return with their entry value on every returning path
+    /// (<see cref="GuestNonvolatileGprPreservation"/>). A caller need not reload these after the call.
+    /// </summary>
+    public uint GprPreservedMask { get; init; }
 
     public bool HasFullSynchronizationFence =>
         (BoundaryFlags & GuestCallBoundaryFlags.RequiresCompleteContext) != 0;
