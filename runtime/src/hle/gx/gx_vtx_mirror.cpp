@@ -2,6 +2,7 @@
 #include "gx_vtx_mirror.h"
 
 #include "gx_cp_decode.h"
+#include "gx_internal.h"
 #include "gx_stream_common.h"
 #include "gx_worker.h"
 #include "runtime_log.h"
@@ -246,6 +247,8 @@ void StartPacket(uint8_t cmd) noexcept {
     g_mirror.packetNeeded = needed;
 }
 
+void Consume(const uint8_t* data, uint32_t size) noexcept;
+
 void FinishPacket() noexcept {
     using namespace GxCmd;
     const uint8_t cmd = g_mirror.packet[0];
@@ -268,8 +271,28 @@ void FinishPacket() noexcept {
         return;
     }
     if (opcode == GX_CMD_CALL_DL_CMD) {
-        // The worker runs the list at this point; its CP writes are not followed here.
-        ResetForPacket(Reason::FifoCallDisplayList);
+        // The worker runs the list at this point (GX__CallDisplayList): follow its bytes as they are
+        // now, like a list the game thread calls, up to a few levels of nesting.
+        static int s_listDepth = 0;
+        const uint32_t listAddr = GxStream::ReadBE32(g_mirror.packet + 1);
+        const uint32_t listSize = GxStream::ReadBE32(g_mirror.packet + 5);
+        const uint8_t* list = nullptr;
+        if (s_listDepth < 4 && listAddr != 0 && listSize != 0) {
+            try {
+                list = static_cast<const uint8_t*>(GuestToHostPtr(listAddr, listSize));
+            } catch (...) {
+            }
+        }
+        if (list == nullptr) {
+            ResetForPacket(Reason::FifoCallDisplayList);
+            return;
+        }
+        ++s_listDepth;
+        Consume(list, listSize);
+        --s_listDepth;
+        if (g_mirror.valid && (g_mirror.packetLength != 0 || g_mirror.skip != 0)) {
+            ResetForPacket(Reason::FifoCallDisplayList);
+        }
         return;
     }
     if (GxStream::IsDrawOpcode(opcode)) {
