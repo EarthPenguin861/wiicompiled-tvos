@@ -31,6 +31,10 @@ struct MirrorState {
     uint8_t packet[9]{};            // header of the packet being assembled
     uint32_t packetLength = 0;      // header bytes received so far; 0 = between packets
     uint32_t packetNeeded = 0;      // header bytes this packet needs
+    // VertexBytes() per vertex format, valid where the bit in vertexBytesKnown is set. Every change
+    // to desc or fmt clears the affected bits (MarkLayoutChanged), so draws reuse the size.
+    uint32_t vertexBytes[8]{};
+    uint8_t vertexBytesKnown = 0;
 };
 
 MirrorState g_mirror;
@@ -132,6 +136,11 @@ void ReportIfDue() {
     }
 }
 
+// Forgets cached vertex sizes after desc (all formats) or one format's fmt changed.
+void MarkLayoutChanged(uint8_t formats = 0xFF) noexcept {
+    g_mirror.vertexBytesKnown &= static_cast<uint8_t>(~formats);
+}
+
 void Reset(Reason reason) noexcept {
     if (g_mirror.valid) {
         ++g_resets[static_cast<size_t>(reason)];
@@ -209,7 +218,16 @@ uint32_t VertexBytes(uint32_t vtxFmt) noexcept {
 }
 
 void StartVertexData(uint32_t vtxFmt, uint32_t vertexCount) noexcept {
-    const uint32_t vertexBytes = VertexBytes(vtxFmt);
+    uint32_t vertexBytes = 0;
+    if (vtxFmt < 8 && (g_mirror.vertexBytesKnown & (1u << vtxFmt)) != 0) {
+        vertexBytes = g_mirror.vertexBytes[vtxFmt];
+    } else {
+        vertexBytes = VertexBytes(vtxFmt);
+        if (vtxFmt < 8) {
+            g_mirror.vertexBytes[vtxFmt] = vertexBytes;
+            g_mirror.vertexBytesKnown |= static_cast<uint8_t>(1u << vtxFmt);
+        }
+    }
     if (vertexBytes == 0) {
         Reset(Reason::VertexLayout);
         return;
@@ -258,6 +276,7 @@ void FinishPacket() noexcept {
         bool changed = false;
         GxCpDecode::ApplyVtxLayoutCpRegWrite(g_mirror.desc, g_mirror.fmt, g_mirror.packet[1],
                                              GxStream::ReadBE32(g_mirror.packet + 2), changed);
+        MarkLayoutChanged();
         return;
     }
     if (opcode == GX_LOAD_XF_REG_CMD) {
@@ -405,6 +424,7 @@ void ReloadFromWorkerState() noexcept {
     }
     std::memcpy(g_mirror.desc, g_hleGxState.vtxDesc, sizeof(g_mirror.desc));
     std::memcpy(g_mirror.fmt, g_hleGxState.vtxAttrFmt, sizeof(g_mirror.fmt));
+    MarkLayoutChanged();
     ResetParser();
     g_mirror.valid = true;
 }
@@ -421,6 +441,7 @@ void OnSetVtxDesc(uint32_t attr, uint32_t type) noexcept {
     if (attr == GX_VA_NBT) {
         g_mirror.desc[GX_VA_NBT] = GX_NONE;
     }
+    MarkLayoutChanged();
 }
 
 void OnClearVtxDesc() noexcept {
@@ -430,6 +451,7 @@ void OnClearVtxDesc() noexcept {
     for (auto& type : g_mirror.desc) {
         type = GX_NONE;
     }
+    MarkLayoutChanged();
 }
 
 void OnSetVtxAttrFmt(uint32_t vtxFmt, uint32_t attr, uint32_t cnt, uint32_t type, uint32_t frac) noexcept {
@@ -445,6 +467,7 @@ void OnSetVtxAttrFmt(uint32_t vtxFmt, uint32_t attr, uint32_t cnt, uint32_t type
         if (attr == GX_VA_NBT) {
             g_mirror.fmt[vtxFmt][GX_VA_NBT] = {};
         }
+        MarkLayoutChanged(static_cast<uint8_t>(1u << vtxFmt));
     }
 }
 
@@ -473,6 +496,12 @@ void OnFifoWrite(uint32_t value, uint32_t sizeBytes) noexcept {
     }
     // HleFifoWrite treats size 0 as 4 and never pushes more than 4 bytes for one write.
     const uint32_t count = sizeBytes == 0 ? 4u : std::min<uint32_t>(sizeBytes, 4u);
+    // Most writes are vertex data or an XF payload the parser only counts down: the same
+    // outcome as Consume's skip branch, without splitting the value into bytes.
+    if (g_mirror.skip > count && count != 3) {
+        g_mirror.skip -= count;
+        return;
+    }
     if (count == 3) {
         // pushBytes appends three bytes of which only one is the written value; the gather pipe
         // never sees such a write, and the mirror does not model it.
