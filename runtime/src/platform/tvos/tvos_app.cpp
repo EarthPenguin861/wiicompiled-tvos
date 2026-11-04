@@ -102,8 +102,7 @@ void RaiseGameThreadQos() {
     int relative = 0;
     pthread_get_qos_class_np(pthread_self(), &before, &relative);
     const int error = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-    std::fprintf(stderr, "[tvos] game thread QoS 0x%x -> user-interactive (%s)
-",
+    std::fprintf(stderr, "[tvos] game thread QoS 0x%x -> user-interactive (%s)\n",
                  static_cast<unsigned>(before), error == 0 ? "ok" : std::strerror(error));
 }
 
