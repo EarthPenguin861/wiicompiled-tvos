@@ -11,9 +11,9 @@
 #include <aurora/event.h>
 #include <dolphin/gx/GXAurora.h>
 
+#include <cstdlib>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -178,24 +178,7 @@ inline void EndAuroraFrame() {
     SetAuroraFrameGxBegun(false);
 }
 
-// When events were last pumped (steady clock, nanoseconds).
-inline std::atomic<int64_t> g_lastAuroraEventPumpNanos{0};
-
 // Poll Aurora events and update cached window/framebuffer dimensions.
 inline void UpdateAuroraAndProcessEvents() {
-    g_lastAuroraEventPumpNanos.store(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count(),
-        std::memory_order_relaxed);
     ProcessAuroraEvents(aurora_update());
-}
-
-// True when events were pumped within `window`. On the Apple TV HD each pump runs the UIKit run
-// loop on the game thread (~0.5 ms), and the retrace path pumps at 60 Hz on top of the pump of
-// every presented frame, so the retrace path skips a pump when one just happened.
-inline bool AuroraEventsPumpedWithin(std::chrono::nanoseconds window) {
-    const int64_t now =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count();
-    return now - g_lastAuroraEventPumpNanos.load(std::memory_order_relaxed) < window.count();
 }

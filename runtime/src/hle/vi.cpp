@@ -325,9 +325,6 @@ void AdvanceRetrace(CpuContext* ctx, Clock::time_point retraceStamp, bool servic
 
     if (serviceAurora) {
         // Process window events (but don't present - that happens in GXCopyDisp)
-#if MKW_HOST_TVOS
-        if (!AuroraEventsPumpedWithin(std::chrono::milliseconds(33)))
-#endif
         UpdateAuroraAndProcessEvents();
 
         // Start a new Aurora frame if one isn't already active
