@@ -27,9 +27,7 @@
 #endif
 #include <SDL3/SDL_main.h>
 
-#include <pthread.h>
 #include <sys/mman.h>
-#include <sys/qos.h>
 #include <unistd.h>
 
 #include <cstddef>
@@ -88,27 +86,8 @@ void GameStackMain(void* argument) {
     std::abort();
 }
 
-// The game runs on the main thread, and every frame waits on it: it is the critical path. Its
-// helpers (the GX worker and the AX mix worker) are user-interactive, while the main thread was
-// observed at the user-initiated priority (37 against their 47), so on the 2-core Apple TV HD each
-// wakeup of a helper preempted the game. Run the game at the helpers' class so they share the cores
-// as equals. MKW_MAIN_QOS=0 keeps the system's choice.
-void RaiseGameThreadQos() {
-    const char* setting = std::getenv("MKW_MAIN_QOS");
-    if (setting != nullptr && std::strcmp(setting, "0") == 0) {
-        return;
-    }
-    qos_class_t before = QOS_CLASS_UNSPECIFIED;
-    int relative = 0;
-    pthread_get_qos_class_np(pthread_self(), &before, &relative);
-    const int error = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-    std::fprintf(stderr, "[tvos] game thread QoS 0x%x -> user-interactive (%s)\n",
-                 static_cast<unsigned>(before), error == 0 ? "ok" : std::strerror(error));
-}
-
 int SDLCALL RunOnGameStack(int argc, char* argv[]) {
     SelectRuntimeArguments(argc, argv);
-    RaiseGameThreadQos();
 
     const std::size_t guardSize = static_cast<std::size_t>(getpagesize());
     const std::size_t totalSize = kGameStackSize + guardSize;
