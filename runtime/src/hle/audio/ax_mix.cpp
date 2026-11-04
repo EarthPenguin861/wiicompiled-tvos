@@ -1375,9 +1375,12 @@ private:
         t_onMixWorker = true;
 #if defined(__APPLE__)
         // The guest joins this mix before it can observe it, so it is game-thread work done in
-        // parallel; keep it in the game thread's QoS class instead of the std::thread default.
+        // parallel. Each mix is short, but on a 2-core Apple TV HD the GX worker (user-interactive)
+        // shares its core, and at the game thread's class the mix waited for it to yield: the game
+        // thread then sat in JoinMix (3% of it in the race profile). The same class as the GX worker
+        // lets the mix run as soon as it is posted.
         pthread_setname_np("AX mix worker");
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #endif
         for (;;) {
             {
