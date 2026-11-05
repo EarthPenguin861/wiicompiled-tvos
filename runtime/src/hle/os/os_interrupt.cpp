@@ -49,24 +49,35 @@ inline void UpdateCurrentContextInterruptFlag(bool enabled)
 }
 } // namespace
 
+// Swaps the global flag, skipping the (full-barrier) atomic exchange when it already holds
+// `enabled`: the sound thread brackets almost every call with disable/restore pairs, mostly
+// nested inside an already-disabled section, and the exchange showed up at ~1% of the game thread.
+inline bool SwapInterruptsEnabled(bool enabled)
+{
+    if (g_interrupts_enabled.load(std::memory_order_acquire) == enabled) {
+        return enabled;
+    }
+    return g_interrupts_enabled.exchange(enabled);
+}
+
 // Minimal, host-side replacements for early OS interrupt/exception helpers.
 extern "C" int32_t OS__DisableInterrupts_801a65ac()
 {
-    const bool previous = g_interrupts_enabled.exchange(false);
+    const bool previous = SwapInterruptsEnabled(false);
     UpdateCurrentContextInterruptFlag(false);
     return previous ? 1 : 0;
 }
 
 extern "C" int32_t OS__RestoreInterrupts_801a65d4(int32_t level)
 {
-    const bool prev = g_interrupts_enabled.exchange(level != 0);
+    const bool prev = SwapInterruptsEnabled(level != 0);
     UpdateCurrentContextInterruptFlag(level != 0);
     return prev ? 1 : 0;
 }
 
 extern "C" int32_t OS__EnableInterrupts_801a65c0()
 {
-    const bool prev = g_interrupts_enabled.exchange(true);
+    const bool prev = SwapInterruptsEnabled(true);
     UpdateCurrentContextInterruptFlag(true);
     return prev ? 1 : 0;
 }
