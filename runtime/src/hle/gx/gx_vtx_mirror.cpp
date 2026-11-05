@@ -237,7 +237,8 @@ void StartVertexData(uint32_t vtxFmt, uint32_t vertexCount) noexcept {
 }
 
 // Packet lengths and the order of the tests follow HleFifoWrite outside a begin.
-void StartPacket(uint8_t cmd) noexcept {
+// Header bytes of the packet `cmd` starts; 1 for one-byte packets and unknown bytes.
+inline uint32_t PacketHeaderBytes(uint8_t cmd) noexcept {
     using namespace GxCmd;
     const uint8_t opcode = cmd & GX_OPCODE_MASK_CMD;
     uint32_t needed = 1;
@@ -256,6 +257,11 @@ void StartPacket(uint8_t cmd) noexcept {
     } else if (GxStream::IsDrawOpcode(opcode)) {
         needed = 3;
     }
+    return needed;
+}
+
+void StartPacket(uint8_t cmd) noexcept {
+    const uint32_t needed = PacketHeaderBytes(cmd);
     // One-byte packets, and unknown bytes, which the worker discards one at a time.
     if (needed == 1) {
         return;
@@ -336,11 +342,26 @@ void Consume(const uint8_t* data, uint32_t size) noexcept {
             }
             continue;
         }
-        const uint8_t byte = data[i++];
         if (g_mirror.packetLength == 0) {
-            StartPacket(byte);
+            // Between packets (most of a display list): take a whole header at once when the
+            // buffer holds it, instead of assembling it a byte per loop iteration.
+            const uint32_t needed = PacketHeaderBytes(data[i]);
+            if (needed == 1) {
+                ++i;
+                continue;
+            }
+            if (size - i >= needed) {
+                std::memcpy(g_mirror.packet, data + i, needed);
+                g_mirror.packetNeeded = needed;
+                g_mirror.packetLength = needed;
+                i += needed;
+                FinishPacket();
+                continue;
+            }
+            StartPacket(data[i++]);
             continue;
         }
+        const uint8_t byte = data[i++];
         g_mirror.packet[g_mirror.packetLength++] = byte;
         if (g_mirror.packetLength == g_mirror.packetNeeded) {
             FinishPacket();
