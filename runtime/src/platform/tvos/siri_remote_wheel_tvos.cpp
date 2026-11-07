@@ -12,6 +12,7 @@
 #include "memory.h"
 #include "runtime_log.h"
 
+#include <SDL3/SDL_events.h>
 #include <dolphin/pad.h>
 
 #include <algorithm>
@@ -46,8 +47,8 @@ constexpr int kSwipeGapReads = 1;
 
 struct Settings {
     bool enabled = true;
-    float lockDegrees = 60.0f;
-    float deadzoneDegrees = 6.0f;
+    float lockDegrees = 55.0f;
+    float deadzoneDegrees = 5.0f;
     float shakeG = 1.3f;
     bool invert = false;
 };
@@ -72,8 +73,8 @@ const Settings& GetSettings() {
     static const Settings settings = [] {
         Settings s;
         s.enabled = EnvFlag("MKW_SIRI_REMOTE", true);
-        s.lockDegrees = EnvFloat("MKW_SIRI_REMOTE_LOCK", 60.0f, 10.0f, 120.0f);
-        s.deadzoneDegrees = EnvFloat("MKW_SIRI_REMOTE_DEADZONE", 6.0f, 0.0f, 30.0f);
+        s.lockDegrees = EnvFloat("MKW_SIRI_REMOTE_LOCK", 55.0f, 10.0f, 120.0f);
+        s.deadzoneDegrees = EnvFloat("MKW_SIRI_REMOTE_DEADZONE", 5.0f, 0.0f, 30.0f);
         s.shakeG = EnvFloat("MKW_SIRI_REMOTE_SHAKE", 1.3f, 0.3f, 5.0f);
         s.invert = EnvFlag("MKW_SIRI_REMOTE_INVERT", false);
         return s;
@@ -129,6 +130,7 @@ struct State {
     uint16_t swipeButton = 0;
     int swipeReadsLeft = 0;
     int swipeGapLeft = 0;
+    SDL_Scancode overlayKey = SDL_SCANCODE_UNKNOWN; // arrow key a swipe holds down in the settings bar
 };
 
 State g_state;
@@ -202,6 +204,40 @@ uint16_t SwipeButtons(Sample sample) noexcept {
         --g_state.swipeGapLeft;
     }
     return 0;
+}
+
+// The settings bar and its prompts are navigated with arrow keys; a swipe there sends one, the
+// way a swipe sends a D-pad press to the game's menus.
+void SendOverlayKey(SDL_Scancode key) noexcept {
+    if (key == g_state.overlayKey) {
+        return;
+    }
+    const auto push = [](SDL_Scancode code, bool down) {
+        SDL_Event event{};
+        event.type = down ? SDL_EVENT_KEY_DOWN : SDL_EVENT_KEY_UP;
+        event.key.timestamp = SDL_GetTicksNS();
+        event.key.scancode = code;
+        event.key.key = SDL_GetKeyFromScancode(code, SDL_KMOD_NONE, false);
+        event.key.down = down;
+        SDL_PushEvent(&event);
+    };
+    if (g_state.overlayKey != SDL_SCANCODE_UNKNOWN) {
+        push(g_state.overlayKey, false);
+    }
+    if (key != SDL_SCANCODE_UNKNOWN) {
+        push(key, true);
+    }
+    g_state.overlayKey = key;
+}
+
+SDL_Scancode ArrowForSwipe(uint16_t button) noexcept {
+    switch (button) {
+    case PAD_BUTTON_LEFT: return SDL_SCANCODE_LEFT;
+    case PAD_BUTTON_RIGHT: return SDL_SCANCODE_RIGHT;
+    case PAD_BUTTON_UP: return SDL_SCANCODE_UP;
+    case PAD_BUTTON_DOWN: return SDL_SCANCODE_DOWN;
+    default: return SDL_SCANCODE_UNKNOWN;
+    }
 }
 
 // The remote is a player of its own: port 1 when no controller is connected, otherwise the first
@@ -379,7 +415,13 @@ void Apply(PADStatus* statuses) noexcept {
         KeepConnected(statuses[g_state.port]);
     }
     // The settings bar, a prompt or the startup screen own the input while they are open.
-    if (!sample.remote || InputBindings::InputBlocked()) {
+    if (sample.remote && InputBindings::InputBlocked()) {
+        g_state.grabbed = false;
+        SendOverlayKey(ArrowForSwipe(SwipeButtons(sample)));
+        return;
+    }
+    SendOverlayKey(SDL_SCANCODE_UNKNOWN);
+    if (!sample.remote) {
         g_state.grabbed = false;
         ResetSwipe();
         return;
