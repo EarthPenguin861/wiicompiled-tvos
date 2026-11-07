@@ -45,6 +45,8 @@ struct RuntimeUserConfig {
     std::optional<std::string> displayMode;
     std::optional<uint32_t> frameInterpolationFps;
     std::optional<bool> metalFxSpatialUpscaling;
+    std::optional<bool> shadows;
+    std::optional<bool> particles;
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> vsync;
     std::optional<bool> gxWorker;
@@ -485,6 +487,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
             config.frameInterpolationFps = migrated;
         }
     }
+    config.shadows = FindConfigValue<bool>(document, "video", "shadows");
+    config.particles = FindConfigValue<bool>(document, "video", "particles");
     config.metalFxSpatialUpscaling =
         FindConfigValue<bool>(document, "video", "metalfx_spatial_upscaling");
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
@@ -896,6 +900,24 @@ inline uint32_t WindowHeight(uint32_t fallback) {
 
 inline float ResolutionMultiplier(float fallback = 1.0f) {
     return std::max(0.0f, Get().resolutionMultiplier.value_or(fallback));
+}
+
+inline bool ShadowsEnabled(bool fallback) {
+    return Get().shadows.value_or(fallback);
+}
+
+inline bool SetShadowsEnabled(bool value) {
+    Mutable().shadows = value;
+    return WriteSetting("video", "shadows", value ? "true" : "false");
+}
+
+inline bool ParticlesEnabled(bool fallback) {
+    return Get().particles.value_or(fallback);
+}
+
+inline bool SetParticlesEnabled(bool value) {
+    Mutable().particles = value;
+    return WriteSetting("video", "particles", value ? "true" : "false");
 }
 
 inline bool MetalFxSpatialUpscaling(bool fallback = false) {

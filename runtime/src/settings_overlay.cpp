@@ -8,6 +8,7 @@
 #include "motion_trick.h"
 #include "game_graphics_options.h"
 #include "music_attenuation.h"
+#include "render_toggles.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "wiimote_host.h"
@@ -1234,6 +1235,15 @@ void DrawGraphicsSettings() {
         }
     }
     ImGui::TextDisabled("Applied when the next scene renderer is created.");
+    bool shadows = RenderToggles::ShadowsEnabled();
+    if (ImGui::Checkbox("Shadows", &shadows)) {
+        RenderToggles::SetShadowsEnabled(shadows);
+    }
+    bool particles = RenderToggles::ParticlesEnabled();
+    if (ImGui::Checkbox("Particle effects", &particles)) {
+        RenderToggles::SetParticlesEnabled(particles);
+    }
+    ImGui::TextDisabled("Kart shadows and effects like boost flames and drift sparks. Off is faster.");
     ImGui::Separator();
     static constexpr const char* kDisplayModes[] = {
         "Windowed",
