@@ -13,6 +13,8 @@
 #include "runtime_log.h"
 
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_keyboard.h>
+#include <SDL3/SDL_timer.h>
 #include <dolphin/pad.h>
 
 #include <algorithm>

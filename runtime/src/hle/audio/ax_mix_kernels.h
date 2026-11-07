@@ -16,14 +16,6 @@
 #define MKW_AX_MIX_AVX2 0
 #endif
 
-// AArch64 (Apple TV, Apple silicon): NEON forms, bit-exact with the scalar references.
-#if !MKW_AX_MIX_AVX2 && defined(__aarch64__)
-#include <arm_neon.h>
-#define MKW_AX_MIX_NEON 1
-#else
-#define MKW_AX_MIX_NEON 0
-#endif
-
 namespace AxMixKernels {
 
 inline int16_t ClampToS16(int32_t value) {
@@ -107,56 +99,10 @@ inline uint16_t MixAddRampAvx2(int32_t* out, const int16_t* input, uint32_t coun
 }
 #endif
 
-#if MKW_AX_MIX_NEON
-inline int32x4_t RampLanes(uint16_t volume, uint16_t delta) {
-    const int32_t lanes[4] = {0, 1, 2, 3};
-    return vmlaq_n_s32(vdupq_n_s32(static_cast<int32_t>(volume)), vld1q_s32(lanes),
-                       static_cast<int32_t>(delta));
-}
-
-inline uint16_t MixAddRampNeon(int32_t* out, const int16_t* input, uint32_t count,
-                               uint16_t volume, uint16_t delta, int16_t& dpop) {
-    uint32_t i = 0;
-    int16_t last = dpop;
-    if (count >= 4) {
-        // As in the AVX2 form, the ramp is only wrapped to 16 bits where it is used.
-        int32x4_t ramp = RampLanes(volume, delta);
-        const int32x4_t blockStep = vdupq_n_s32(static_cast<int32_t>(delta) * 4);
-        const int32x4_t wrapMask = vdupq_n_s32(0xFFFF);
-        const int32x4_t clampLow = vdupq_n_s32(-0x8000);
-        const int32x4_t clampHigh = vdupq_n_s32(0x7FFF);
-        int32x4_t lastBlock = vdupq_n_s32(0);
-        for (; i + 4 <= count; i += 4) {
-            const int32x4_t samples = vmovl_s16(vld1_s16(input + i));
-            const int32x4_t vol = vandq_s32(ramp, wrapMask);
-            int32x4_t scaled = vshrq_n_s32(vmulq_s32(samples, vol), 15);
-            scaled = vminq_s32(vmaxq_s32(scaled, clampLow), clampHigh);
-            vst1q_s32(out + i, vaddq_s32(vld1q_s32(out + i), scaled));
-            lastBlock = scaled;
-            ramp = vaddq_s32(ramp, blockStep);
-        }
-        last = static_cast<int16_t>(vgetq_lane_s32(lastBlock, 3));
-        volume = static_cast<uint16_t>(static_cast<uint32_t>(vgetq_lane_s32(ramp, 0)));
-    }
-    for (; i < count; ++i) {
-        const int32_t scaled =
-            (static_cast<int32_t>(input[i]) * static_cast<int32_t>(volume)) >> 15;
-        const int16_t sample = ClampToS16(scaled);
-        out[i] += sample;
-        volume = static_cast<uint16_t>(volume + delta);
-        last = sample;
-    }
-    dpop = last;
-    return volume;
-}
-#endif
-
 inline uint16_t MixAddRamp(int32_t* out, const int16_t* input, uint32_t count,
                            uint16_t volume, uint16_t delta, int16_t& dpop) {
 #if MKW_AX_MIX_AVX2
     return MixAddRampAvx2(out, input, count, volume, delta, dpop);
-#elif MKW_AX_MIX_NEON
-    return MixAddRampNeon(out, input, count, volume, delta, dpop);
 #else
     return MixAddRampScalar(out, input, count, volume, delta, dpop);
 #endif
@@ -216,39 +162,10 @@ inline uint16_t ScaleRampAvx2(int16_t* samples, uint32_t count, uint16_t volume,
 }
 #endif
 
-#if MKW_AX_MIX_NEON
-inline uint16_t ScaleRampNeon(int16_t* samples, uint32_t count, uint16_t volume,
-                              uint16_t delta) {
-    uint32_t i = 0;
-    if (count >= 4) {
-        int32x4_t ramp = RampLanes(volume, delta);
-        const int32x4_t blockStep = vdupq_n_s32(static_cast<int32_t>(delta) * 4);
-        const int32x4_t wrapMask = vdupq_n_s32(0xFFFF);
-        for (; i + 4 <= count; i += 4) {
-            const int32x4_t block = vmovl_s16(vld1_s16(samples + i));
-            const int32x4_t scaled = vshrq_n_s32(vmulq_s32(block, vandq_s32(ramp, wrapMask)), 15);
-            // Saturating 32 -> 16 narrowing is exactly clamp(-0x8000, 0x7fff).
-            vst1_s16(samples + i, vqmovn_s32(scaled));
-            ramp = vaddq_s32(ramp, blockStep);
-        }
-        volume = static_cast<uint16_t>(static_cast<uint32_t>(vgetq_lane_s32(ramp, 0)));
-    }
-    for (; i < count; ++i) {
-        const int32_t scaled =
-            (static_cast<int32_t>(samples[i]) * static_cast<int32_t>(volume)) >> 15;
-        samples[i] = ClampToS16(scaled);
-        volume = static_cast<uint16_t>(volume + delta);
-    }
-    return volume;
-}
-#endif
-
 inline uint16_t ScaleRamp(int16_t* samples, uint32_t count, uint16_t volume,
                           uint16_t delta) {
 #if MKW_AX_MIX_AVX2
     return ScaleRampAvx2(samples, count, volume, delta);
-#elif MKW_AX_MIX_NEON
-    return ScaleRampNeon(samples, count, volume, delta);
 #else
     return ScaleRampScalar(samples, count, volume, delta);
 #endif
@@ -297,30 +214,10 @@ inline void MixAccumRamp32Avx2(int32_t* dst, const int32_t* src, const uint16_t*
 }
 #endif
 
-#if MKW_AX_MIX_NEON
-inline void MixAccumRamp32Neon(int32_t* dst, const int32_t* src, const uint16_t* ramp,
-                               uint32_t count) {
-    uint32_t i = 0;
-    for (; i + 4 <= count; i += 4) {
-        const int32x4_t source = vld1q_s32(src + i);
-        const int32x4_t gain = vreinterpretq_s32_u32(vmovl_u16(vld1_u16(ramp + i)));
-        // Full 64-bit products, arithmetic shift by 15, then truncation to 32 bits: the scalar
-        // static_cast<int32_t>(p >> 15).
-        const int64x2_t low = vmull_s32(vget_low_s32(source), vget_low_s32(gain));
-        const int64x2_t high = vmull_high_s32(source, gain);
-        const int32x4_t result = vcombine_s32(vshrn_n_s64(low, 15), vshrn_n_s64(high, 15));
-        vst1q_s32(dst + i, vaddq_s32(vld1q_s32(dst + i), result));
-    }
-    MixAccumRamp32Scalar(dst + i, src + i, ramp + i, count - i);
-}
-#endif
-
 inline void MixAccumRamp32(int32_t* dst, const int32_t* src, const uint16_t* ramp,
                            uint32_t count) {
 #if MKW_AX_MIX_AVX2
     MixAccumRamp32Avx2(dst, src, ramp, count);
-#elif MKW_AX_MIX_NEON
-    MixAccumRamp32Neon(dst, src, ramp, count);
 #else
     MixAccumRamp32Scalar(dst, src, ramp, count);
 #endif
@@ -373,30 +270,9 @@ inline void LoadBigEndian32Avx2(int32_t* dst, const uint8_t* src, size_t count) 
 }
 #endif
 
-#if MKW_AX_MIX_NEON
-inline void StoreBigEndian32Neon(uint8_t* dst, const int32_t* src, size_t count) {
-    size_t i = 0;
-    for (; i + 4 <= count; i += 4) {
-        vst1q_u8(dst + i * sizeof(uint32_t),
-                 vrev32q_u8(vreinterpretq_u8_s32(vld1q_s32(src + i))));
-    }
-    StoreBigEndian32Scalar(dst + i * sizeof(uint32_t), src + i, count - i);
-}
-
-inline void LoadBigEndian32Neon(int32_t* dst, const uint8_t* src, size_t count) {
-    size_t i = 0;
-    for (; i + 4 <= count; i += 4) {
-        vst1q_s32(dst + i, vreinterpretq_s32_u8(vrev32q_u8(vld1q_u8(src + i * sizeof(uint32_t)))));
-    }
-    LoadBigEndian32Scalar(dst + i, src + i * sizeof(uint32_t), count - i);
-}
-#endif
-
 inline void StoreBigEndian32(uint8_t* dst, const int32_t* src, size_t count) {
 #if MKW_AX_MIX_AVX2
     StoreBigEndian32Avx2(dst, src, count);
-#elif MKW_AX_MIX_NEON
-    StoreBigEndian32Neon(dst, src, count);
 #else
     StoreBigEndian32Scalar(dst, src, count);
 #endif
@@ -405,8 +281,6 @@ inline void StoreBigEndian32(uint8_t* dst, const int32_t* src, size_t count) {
 inline void LoadBigEndian32(int32_t* dst, const uint8_t* src, size_t count) {
 #if MKW_AX_MIX_AVX2
     LoadBigEndian32Avx2(dst, src, count);
-#elif MKW_AX_MIX_NEON
-    LoadBigEndian32Neon(dst, src, count);
 #else
     LoadBigEndian32Scalar(dst, src, count);
 #endif
