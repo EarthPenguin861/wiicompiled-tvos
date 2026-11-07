@@ -140,8 +140,8 @@ bool Compute(uint32_t self, int32_t channel, uint32_t voice, MixResult& out) {
         return false;
     }
     const uint32_t span = std::max(kVoiceBytes, 0x40 + voice * kVoiceOutParamStride);
-    const uint8_t* v = Memory::GetPointerFast(self, span);
-    const uint8_t* axm = Memory::GetPointerFast(kAxManagerInstance, 4);
+    const uint8_t* v = MemoryInline::GetPointerFast(self, span);
+    const uint8_t* axm = MemoryInline::GetPointerFast(kAxManagerInstance, 4);
     if (v == nullptr || axm == nullptr) {
         return false;
     }
@@ -283,7 +283,7 @@ bool Compute(uint32_t self, int32_t channel, uint32_t voice, MixResult& out) {
 }
 
 void Store(uint32_t address, const uint16_t* values, size_t count) {
-    uint8_t* dst = Memory::GetPointerFast(address, count * 2);
+    uint8_t* dst = MemoryInline::GetPointerFast(address, count * 2);
     if (dst != nullptr) {
         for (size_t i = 0; i < count; ++i) {
             BigEndian::Write16(dst + i * 2, values[i]);
