@@ -127,6 +127,20 @@ extern "C" uint32_t PAD__Read_HLE(uint32_t statusPtr)
 #endif
     MotionTrick::Apply(statuses);
 
+    // A real GameCube pad reports a pressed A or B with full analog travel as well; SDL gamepads
+    // only give the digital press, so match what the Siri Remote path already reports.
+    for (PADStatus& status : statuses) {
+        if (status.err != PAD_ERR_NONE) {
+            continue;
+        }
+        if ((status.button & PAD_BUTTON_A) != 0 && status.analogA == 0) {
+            status.analogA = 255;
+        }
+        if ((status.button & PAD_BUTTON_B) != 0 && status.analogB == 0) {
+            status.analogB = 255;
+        }
+    }
+
     try {
         for (uint32_t i = 0; i < PAD_CHANMAX; ++i) {
             WritePadStatus(statusPtr + static_cast<uint32_t>(i * PadStatusContract::kGuestStatusSize),
