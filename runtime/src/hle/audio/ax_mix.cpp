@@ -27,6 +27,7 @@
 #include <fstream>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 #if defined(__APPLE__)
@@ -75,6 +76,10 @@ public:
         RefreshMixMemoryMap();
         std::lock_guard<std::mutex> lock(m_mutex);
         m_mixWorkerEnabled = RuntimeConfigFile::AudioMixWorkerEnabled(true);
+        // MKW_AX_MIX_WORKER=0 mixes inline on the game thread whatever the setting says.
+        if (const char* worker = std::getenv("MKW_AX_MIX_WORKER"); worker != nullptr && worker[0] == '0') {
+            m_mixWorkerEnabled = false;
+        }
         MarkDspInitialized();
         ResetDspTaskGlobals();
         m_mailState = MailState::WaitingForCmdListSize;
@@ -1380,7 +1385,17 @@ private:
         // thread then sat in JoinMix (3% of it in the race profile). The same class as the GX worker
         // lets the mix run as soon as it is posted.
         pthread_setname_np("AX mix worker");
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        // MKW_AX_MIX_QOS (interactive, initiated, default, utility) overrides the class, for
+        // benchmarking the trade-off: a higher class also preempts the game thread that posts it.
+        qos_class_t qos = QOS_CLASS_USER_INTERACTIVE;
+        if (const char* name = std::getenv("MKW_AX_MIX_QOS")) {
+            const std::string_view value(name);
+            qos = value == "initiated" ? QOS_CLASS_USER_INITIATED
+                : value == "default"   ? QOS_CLASS_DEFAULT
+                : value == "utility"   ? QOS_CLASS_UTILITY
+                                       : QOS_CLASS_USER_INTERACTIVE;
+        }
+        pthread_set_qos_class_self_np(qos, 0);
 #endif
         for (;;) {
             {
