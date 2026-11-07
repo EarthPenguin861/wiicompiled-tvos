@@ -106,6 +106,7 @@ jobs:
             --output-dir "$RUNNER_TEMP/out" \
             --cpu "${{ inputs.cpu }}" \
             --adhoc-sign \
+            --setup-version "0.9.${{ github.run_number }}" \
             --ipa ${{ inputs.game_data == 'separate' && '--no-bundle-data' || '' }}
           df -h /
 

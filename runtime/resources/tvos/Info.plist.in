@@ -23,7 +23,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>@MKW_TVOS_PLIST_SHORT_VERSION@</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>@MKW_TVOS_PLIST_SHORT_VERSION@</string>
 	<key>CFBundleSupportedPlatforms</key>
 	<array>
 		<string>@MKW_TVOS_PLIST_SUPPORTED_PLATFORM@</string>
