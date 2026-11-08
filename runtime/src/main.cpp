@@ -22,6 +22,9 @@
 #include <mutex>
 #include <unordered_map>
 #include <vector>
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 #if !defined(_WIN32)
 #include <unistd.h>
@@ -1544,6 +1547,19 @@ int RuntimeMain(int argc, char** argv) {
         g_auroraInitialized.store(true, std::memory_order_release);
         GxWorker::SetWaitCallback(ServiceGuestTimingDuringAuroraFrameWait);
         GxWorker::Start();
+#if defined(__APPLE__)
+        // MKW_GAME_QOS=interactive lifts the game thread to the GX worker's class. On the 2-core
+        // Apple TV HD it otherwise runs one class below the GX and AX mix workers and is
+        // preempted by them while it is the frame's critical path.
+        if (const char* qosName = std::getenv("MKW_GAME_QOS")) {
+            const std::string_view value(qosName);
+            const qos_class_t qos = value == "interactive" ? QOS_CLASS_USER_INTERACTIVE
+                                  : value == "default"     ? QOS_CLASS_DEFAULT
+                                                           : QOS_CLASS_USER_INITIATED;
+            const int result = pthread_set_qos_class_self_np(qos, 0);
+            RT_LOG(RT_TAG_CONFIG) << "game thread qos=" << value << " result=" << result << std::endl;
+        }
+#endif
 
         auto entry = ResolveEntry();
         InitializePersistentCpuContext();

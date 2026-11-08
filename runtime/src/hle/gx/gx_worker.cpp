@@ -197,7 +197,12 @@ void WorkerMain() {
     // processor and render worker (user-initiated). On a 2-core Apple TV HD the worker then ran
     // only when the game thread blocked on it in Sync, which serialized the two. It sits on the
     // critical path between them, so it gets the class above both.
-    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    // MKW_GX_WORKER_QOS=initiated drops it to the game thread's class, for benchmarking.
+    const char* qosName = std::getenv("MKW_GX_WORKER_QOS");
+    pthread_set_qos_class_self_np(
+        qosName != nullptr && std::strcmp(qosName, "initiated") == 0 ? QOS_CLASS_USER_INITIATED
+                                                                     : QOS_CLASS_USER_INTERACTIVE,
+        0);
 #endif
     uint64_t tail = g_tail.load(std::memory_order_relaxed);
     for (;;) {
