@@ -11,6 +11,7 @@
 #include "ppc_runtime.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "thread_priority.h"
 
 #include <algorithm>
 #include <array>
@@ -1396,6 +1397,7 @@ private:
                                        : QOS_CLASS_USER_INTERACTIVE;
         }
         pthread_set_qos_class_self_np(qos, 0);
+        ThreadPriority::ApplyToCurrentThread("AX mix worker", "MKW_AX_MIX_PRIO", "");
 #endif
         for (;;) {
             {

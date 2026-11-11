@@ -68,6 +68,7 @@
 #include "gx_guest_write.h"
 #include "memory.h"
 #include "system_bridge.h"
+#include "thread_priority.h"
 #include "ppc_runtime.h"
 #include "aurora_events.h"
 #include "wiimote_host.h"
@@ -1548,17 +1549,13 @@ int RuntimeMain(int argc, char** argv) {
         GxWorker::SetWaitCallback(ServiceGuestTimingDuringAuroraFrameWait);
         GxWorker::Start();
 #if defined(__APPLE__)
-        // MKW_GAME_QOS=interactive lifts the game thread to the GX worker's class. On the 2-core
-        // Apple TV HD it otherwise runs one class below the GX and AX mix workers and is
-        // preempted by them while it is the frame's critical path.
-        if (const char* qosName = std::getenv("MKW_GAME_QOS")) {
-            const std::string_view value(qosName);
-            const qos_class_t qos = value == "interactive" ? QOS_CLASS_USER_INTERACTIVE
-                                  : value == "default"     ? QOS_CLASS_DEFAULT
-                                                           : QOS_CLASS_USER_INITIATED;
-            const int result = pthread_set_qos_class_self_np(qos, 0);
-            RT_LOG(RT_TAG_CONFIG) << "game thread qos=" << value << " result=" << result << std::endl;
-        }
+        // aurora_initialize names this thread through SDL_SetCurrentThreadPriority(NORMAL), which
+        // on Apple platforms is pthread_setschedparam(SCHED_OTHER, 37): the thread leaves the QoS
+        // system (pthread_set_qos_class_self_np then fails with EPERM) and drops from the app main
+        // thread's 47 to 37, below the GX and AX mix workers. On the 2-core Apple TV HD it is the
+        // frame's critical path and was preempted for about a fifth of every frame.
+        // MKW_GAME_PRIO=<15..47>[rr] sets its priority (rr = fixed priority); "off" leaves it.
+        ThreadPriority::ApplyToCurrentThread("game", "MKW_GAME_PRIO", "");
 #endif
 
         auto entry = ResolveEntry();

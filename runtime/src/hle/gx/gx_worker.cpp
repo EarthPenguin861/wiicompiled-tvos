@@ -3,6 +3,7 @@
 #include "perf_stats.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
+#include "thread_priority.h"
 
 #include <dolphin/gx/GXAurora.h>
 
@@ -203,6 +204,8 @@ void WorkerMain() {
         qosName != nullptr && std::strcmp(qosName, "initiated") == 0 ? QOS_CLASS_USER_INITIATED
                                                                      : QOS_CLASS_USER_INTERACTIVE,
         0);
+    // MKW_GX_WORKER_PRIO=<15..47>[rr] replaces the class with an explicit priority, for benchmarking.
+    ThreadPriority::ApplyToCurrentThread("GX worker", "MKW_GX_WORKER_PRIO", "");
 #endif
     uint64_t tail = g_tail.load(std::memory_order_relaxed);
     for (;;) {
