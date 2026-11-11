@@ -244,6 +244,9 @@ extern "C" void SelectThread_801a9c08(CpuContext* ctx)
                 if (::Memory::Read32(kSchedulerPendingFlagAddr) != 0) {
                     break;
                 }
+                if (OS_HLE_DeliverLateFrameWake(cpu)) {
+                    continue;
+                }
                 VI_HLE_WaitForNextRetracePoll();
             }
 

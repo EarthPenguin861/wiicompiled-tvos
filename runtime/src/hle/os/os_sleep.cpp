@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <mutex>
 #include <unordered_map>
@@ -11,6 +13,7 @@
 #include <vector>
 
 #include "abi_bridge.h"
+#include "guest_abi/guest_region.h"
 #include "memory.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
@@ -388,6 +391,53 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
 }
 } // namespace
 
+// EGG::AsyncDisplay::beginFrame parks the game's main thread on the display's queue until the next
+// retrace at least once per frame, even when producing the frame already took longer than the
+// display period. On hardware that lines the buffer swap up with vblank. Here Aurora presents, so
+// for a late frame the wait only rounds its time up to the next retrace of the 60 Hz grid: half a
+// retrace per frame on average, and a frame that gets a few milliseconds faster shows no gain until
+// it crosses a boundary.
+// With MKW_FREE_RUN_LATE=1 a late frame's wait ends as soon as the guest scheduler has nothing else
+// to run (the idle loop in os_scheduler.cpp) instead of at the next retrace, so lower-priority
+// guest threads still get their turn. A frame that is on time waits exactly as before.
+namespace {
+
+// Queue to wake from the idle loop; guest scheduler (game thread) only.
+uint32_t g_lateFrameWakeQueue = 0;
+
+bool FreeRunLateFrames() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("MKW_FREE_RUN_LATE");
+        return value != nullptr && std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+bool IsLateDisplayWait(uint32_t queuePtr) {
+    // EGG::AsyncDisplay's instance pointer; +0x58 its wait queue, +0x60 the sync mode (0 = VI
+    // retrace, 1 = the PAL50 alarm), +0x6C retraces counted, +0x68 the count at the last frame,
+    // +0x8 retraces per frame.
+    const uint32_t display = ::Memory::Read32(MKW_GADDR(80386D90));
+    if (display == 0 || queuePtr != display + 0x58u || ::Memory::Read32(display + 0x60u) != 0) {
+        return false;
+    }
+    const uint32_t elapsed = ::Memory::Read32(display + 0x6Cu) - ::Memory::Read32(display + 0x68u);
+    return elapsed >= ::Memory::Read8(display + 0x8u);
+}
+
+} // namespace
+
+bool OS_HLE_DeliverLateFrameWake(CpuContext* cpu) {
+    const uint32_t queue = g_lateFrameWakeQueue;
+    if (queue == 0) {
+        return false;
+    }
+    g_lateFrameWakeQueue = 0;
+    cpu->gpr[3] = queue;
+    OSWakeupThread_HLE_801aaaa4(cpu);
+    return true;
+}
+
 // OSSleepThread (0x801aa9b8)
 // Puts the current thread to sleep on a specified wait queue.
 extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
@@ -436,6 +486,11 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
             return;
         }
 
+        const bool lateFrame = FreeRunLateFrames() && IsLateDisplayWait(queuePtr);
+        if (lateFrame) {
+            g_lateFrameWakeQueue = queuePtr;
+        }
+
         // Mark thread as WAITING
         ::Memory::Write16(currentThread + 0x2C8u, 4);
 
@@ -459,6 +514,10 @@ extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx)
         // Match the original SDK behavior: sleep yields via SelectThread(0).
         cpu->gpr[3] = 0;
         SelectThread_801a9c08(cpu);
+        if (lateFrame) {
+            // A real retrace may have woken the thread first.
+            g_lateFrameWakeQueue = 0;
+        }
 
         // Defence in depth: SelectThread has other paths that return without switching (context
         // mismatch, uninitialised thread system, a run queue that drained mid-enqueue). None of

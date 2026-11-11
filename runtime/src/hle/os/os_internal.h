@@ -155,4 +155,7 @@ extern "C" void OSSuspendThread_HLE_801aa6a8(CpuContext* ctx);
 extern "C" void OSResumeThread_HLE_801aa58c(CpuContext* ctx);
 extern "C" void OSWakeupThread_HLE_801aaaa4(CpuContext* ctx);
 extern "C" void OSSleepThread_HLE_801aa9b8(CpuContext* ctx);
+// Ends a late frame's display wait from the scheduler's idle loop (see os_sleep.cpp). Returns true
+// when it woke the waiting thread.
+bool OS_HLE_DeliverLateFrameWake(CpuContext* cpu);
 extern "C" void SelectThread_801a9c08(CpuContext* ctx);
