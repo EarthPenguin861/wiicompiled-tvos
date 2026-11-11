@@ -83,6 +83,16 @@ void SetInlineListener(void (*listener)(void* caller) noexcept);
 // Blocks until every recorded command has executed.
 void Sync();
 
+// MKW_GX_OVERLAP=1: a frame ends without waiting for the worker, so the game thread runs the next
+// frame's game logic while the worker still draws this one. The worker stays at most one frame
+// behind: the next present waits for the end of the previous frame first. Off by default; the
+// worker then reads guest memory while the game writes it, as the real GPU does.
+bool OverlapFrames();
+// Records that the frame just submitted ends here (publishing it to the worker).
+void MarkFrameEnd();
+// Blocks until the worker has run everything up to the last MarkFrameEnd.
+void WaitForMarkedFrameEnd();
+
 // GX entry points run inline on the game thread while inside (after a Sync), for work whose
 // results the guest needs immediately.
 // changesGxState=false is for scopes that only wait for the worker (GXDrawDone): the vertex-state

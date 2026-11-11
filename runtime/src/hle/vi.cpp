@@ -524,6 +524,11 @@ void VI_HLE_PresentFrame(bool presentedXfb, bool paceToRetrace) {
     struct SequenceGuard {
         ~SequenceGuard() { s_presentSequenceActive.store(false, std::memory_order_release); }
     } sequenceGuard;
+    // Frame overlap: the worker may still be ending the previous frame, which reads the present
+    // schedule and imgui state set below. Keep it at most one frame behind.
+    if (GxWorker::OverlapFrames() && GxWorker::ShouldDefer()) {
+        GxWorker::WaitForMarkedFrameEnd();
+    }
     Clock::time_point paceDeadline{};
     bool paceThisFrame = false;
     if (paceToRetrace) {

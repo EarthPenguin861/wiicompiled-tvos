@@ -143,8 +143,12 @@ void SetAuroraFrameGxBegun(bool begun);
 
 inline bool BeginAuroraFrame() {
     if (GxWorker::ShouldDefer()) {
-        // The window half can touch the surface and render targets the worker draws into.
-        GxWorker::Sync();
+        // The window half can touch the surface and render targets the worker draws into. With
+        // frame overlap the worker may still be drawing the previous frame; that is left running
+        // only while the window half will not create or release the surface.
+        if (!GxWorker::OverlapFrames() || !aurora_window_frame_ready()) {
+            GxWorker::Sync();
+        }
         bool begun = false;
         {
             PerfStats::WaitScope wait;
@@ -171,6 +175,10 @@ inline void EndAuroraFrame() {
     if (GxWorker::ShouldDefer()) {
         AuroraImguiFrame* imgui = aurora_end_frame_window();
         GxWorker::Submit([imgui] { GxWorkerEndFrame(imgui); });
+        if (GxWorker::OverlapFrames()) {
+            GxWorker::MarkFrameEnd();
+            return;
+        }
         GxWorker::Sync();
         return;
     }

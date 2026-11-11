@@ -324,3 +324,36 @@ index 0361263..82500b5 100644
    constexpr auto name = Unknown;
  #endif
  
+diff --git a/include/aurora/aurora.h b/include/aurora/aurora.h
+index 0f2a02a..1ba3ca9 100644
+--- a/include/aurora/aurora.h
++++ b/include/aurora/aurora.h
+@@ -160,6 +160,9 @@ void aurora_end_frame();
+ // producer thread.
+ typedef struct AuroraImguiFrame AuroraImguiFrame;
+ bool aurora_begin_frame_window();
++// True when aurora_begin_frame_window would neither fail nor create or release the surface, so it
++// can run while the producer thread is still drawing the previous frame.
++bool aurora_window_frame_ready();
+ bool aurora_begin_frame_gx();
+ AuroraImguiFrame* aurora_end_frame_window();
+ // Takes ownership of frame.
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index d08aa8d..412c1b6 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -810,6 +810,14 @@ void aurora_end_frame() { aurora::end_frame(); }
+ 
+ bool aurora_begin_frame_window() { return aurora::begin_frame_window(); }
+ 
++bool aurora_window_frame_ready() {
++#ifdef AURORA_ENABLE_GX
++  return aurora::window::is_presentable() && !aurora::window::is_paused() && static_cast<bool>(aurora::webgpu::g_surface);
++#else
++  return true;
++#endif
++}
++
+ bool aurora_begin_frame_gx() { return aurora::begin_frame_gx(); }
+ 
+ AuroraImguiFrame* aurora_end_frame_window() {

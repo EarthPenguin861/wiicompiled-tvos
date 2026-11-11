@@ -346,6 +346,41 @@ void Sync() {
     } while (detail::g_fifoPending || g_tail.load(std::memory_order_acquire) != g_write);
 }
 
+bool OverlapFrames() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("MKW_GX_OVERLAP");
+        const bool on = value != nullptr && std::strcmp(value, "0") != 0;
+        if (on) {
+            RT_LOGF(RT_TAG_GX, "GX worker frame overlap on\n");
+        }
+        return on;
+    }();
+    return enabled;
+}
+
+namespace {
+// Game thread only.
+uint64_t g_frameEndMark = 0;
+} // namespace
+
+void MarkFrameEnd() {
+    if (!Active() || detail::t_onWorker) {
+        return;
+    }
+    if (detail::g_fifoPending) {
+        detail::FlushFifo();
+    }
+    Publish();
+    g_frameEndMark = g_write;
+}
+
+void WaitForMarkedFrameEnd() {
+    if (!Active() || detail::t_onWorker || g_tail.load(std::memory_order_acquire) >= g_frameEndMark) {
+        return;
+    }
+    WaitForTail(g_frameEndMark, true);
+}
+
 void SetWaitCallback(void (*callback)()) { g_waitCallback = callback; }
 
 void SetInlineListener(void (*listener)(void* caller) noexcept) { g_inlineListener = listener; }
