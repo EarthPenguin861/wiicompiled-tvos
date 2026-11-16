@@ -1,4 +1,5 @@
-// MKW_RACE_30FPS=1: races with one or two local players use the game's own 30 fps mode.
+// [video] race_30fps = true (or MKW_RACE_30FPS=1): races with one or two local players use the
+// game's own 30 fps mode.
 //
 // RKSystem::Run draws one frame per game update unless RKSystem's 30 fps flag is set, in which case
 // it runs two updates per drawn frame and the scene code skips its draw preparation on the first of
@@ -11,6 +12,7 @@
 #include "guest_abi/guest_region.h"
 #include "guest_function_imports.h"
 #include "memory.h"
+#include "runtime_config.h"
 #include "runtime_log.h"
 
 #include <cstdlib>
@@ -21,8 +23,9 @@ namespace {
 
 bool ForceRace30Fps() {
     static const bool enabled = [] {
+        // [video] race_30fps in the config file (off by default); MKW_RACE_30FPS=0/1 overrides it.
         const char* value = std::getenv("MKW_RACE_30FPS");
-        return value != nullptr && std::strcmp(value, "0") != 0;
+        return value != nullptr ? std::strcmp(value, "0") != 0 : RuntimeConfigFile::Race30FpsEnabled(false);
     }();
     return enabled;
 }

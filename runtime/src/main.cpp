@@ -1554,8 +1554,9 @@ int RuntimeMain(int argc, char** argv) {
         // system (pthread_set_qos_class_self_np then fails with EPERM) and drops from the app main
         // thread's 47 to 37, below the GX and AX mix workers. On the 2-core Apple TV HD it is the
         // frame's critical path and was preempted for about a fifth of every frame.
-        // MKW_GAME_PRIO=<15..47>[rr] sets its priority (rr = fixed priority); "off" leaves it.
-        ThreadPriority::ApplyToCurrentThread("game", "MKW_GAME_PRIO", "");
+        // It gets 47 back on tvOS. MKW_GAME_PRIO=<15..47>[rr] sets another priority (rr = fixed
+        // priority); "off" leaves it at 37.
+        ThreadPriority::ApplyToCurrentThread("game", "MKW_GAME_PRIO", MKW_HOST_TVOS ? "47" : "");
 #endif
 
         auto entry = ResolveEntry();

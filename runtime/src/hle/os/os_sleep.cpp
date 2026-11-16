@@ -15,6 +15,7 @@
 #include "abi_bridge.h"
 #include "guest_abi/guest_region.h"
 #include "memory.h"
+#include "platform/apple_target.h"
 #include "hle_stubs.h"
 #include "ppc_runtime.h"
 #include "fiber_manager.h"
@@ -397,9 +398,10 @@ void ReportUnparkableSleep(uint32_t queuePtr, uint32_t thread)
 // for a late frame the wait only rounds its time up to the next retrace of the 60 Hz grid: half a
 // retrace per frame on average, and a frame that gets a few milliseconds faster shows no gain until
 // it crosses a boundary.
-// With MKW_FREE_RUN_LATE=1 a late frame's wait ends as soon as the guest scheduler has nothing else
-// to run (the idle loop in os_scheduler.cpp) instead of at the next retrace, so lower-priority
-// guest threads still get their turn. A frame that is on time waits exactly as before.
+// With free-running late frames, a late frame's wait ends as soon as the guest scheduler has
+// nothing else to run (the idle loop in os_scheduler.cpp) instead of at the next retrace, so
+// lower-priority guest threads still get their turn. A frame that is on time waits exactly as
+// before. On by default on tvOS, off elsewhere; MKW_FREE_RUN_LATE=0/1 overrides.
 namespace {
 
 // Queue to wake from the idle loop; guest scheduler (game thread) only.
@@ -408,7 +410,7 @@ uint32_t g_lateFrameWakeQueue = 0;
 bool FreeRunLateFrames() {
     static const bool enabled = [] {
         const char* value = std::getenv("MKW_FREE_RUN_LATE");
-        return value != nullptr && std::strcmp(value, "0") != 0;
+        return value != nullptr ? std::strcmp(value, "0") != 0 : MKW_HOST_TVOS != 0;
     }();
     return enabled;
 }

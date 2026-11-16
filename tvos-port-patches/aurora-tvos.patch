@@ -357,3 +357,31 @@ index d08aa8d..412c1b6 100644
  bool aurora_begin_frame_gx() { return aurora::begin_frame_gx(); }
  
  AuroraImguiFrame* aurora_end_frame_window() {
+diff --git a/cmake/AuroraSDL3Patches.cmake b/cmake/AuroraSDL3Patches.cmake
+index d1faad7..15cdcb1 100644
+--- a/cmake/AuroraSDL3Patches.cmake
++++ b/cmake/AuroraSDL3Patches.cmake
+@@ -406,6 +406,23 @@ static bool HIDAPI_DriverWii_InitDevice(SDL_HIDAPI_Device *device)
+     values[1] = (((float)z - ctx->m_fAccelZeroG[2]) / ctx->m_fAccelPerG[2]) * SDL_STANDARD_GRAVITY;
+     values[2] = (((float)y - ctx->m_fAccelZeroG[1]) / ctx->m_fAccelPerG[1]) * SDL_STANDARD_GRAVITY;
+ ]==])
++
++  # iOS/tvOS: SDL runs the run loop for 2 microseconds per pump. A non-zero interval sleeps until
++  # a libdispatch timer fires, which took about 1.5 ms per call on a loaded two-core Apple TV HD
++  # (two calls per frame, on the game thread). Zero makes each call one non-blocking pass.
++  set(_uikit_events "${sdl_source_dir}/src/video/uikit/SDL_uikitevents.m")
++  if (EXISTS "${_uikit_events}")
++    _aurora_sdl3_replace("${_uikit_events}" "UIKit event pump does not block"
++[==[    const CFTimeInterval seconds = 0.000002;
++]==]
++[==[    /* WiiCompiled: see AuroraSDL3Patches.cmake. MKW_UIKIT_PUMP_BLOCK=1 restores SDL's interval. */
++    static CFTimeInterval seconds = -1.0;
++    if (seconds < 0.0) {
++        const char *block = SDL_getenv("MKW_UIKIT_PUMP_BLOCK");
++        seconds = (block && *block && *block != '0') ? 0.000002 : 0.0;
++    }
++]==])
++  endif ()
+ endfunction()
+ 
+ # Script mode (FetchContent PATCH_COMMAND).

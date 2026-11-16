@@ -83,10 +83,11 @@ void SetInlineListener(void (*listener)(void* caller) noexcept);
 // Blocks until every recorded command has executed.
 void Sync();
 
-// MKW_GX_OVERLAP=1: a frame ends without waiting for the worker, so the game thread runs the next
+// Frame overlap: a frame ends without waiting for the worker, so the game thread runs the next
 // frame's game logic while the worker still draws this one. The worker stays at most one frame
-// behind: the next present waits for the end of the previous frame first. Off by default; the
-// worker then reads guest memory while the game writes it, as the real GPU does.
+// behind: the next present waits for the end of the previous frame first. The worker then reads
+// guest memory while the game writes it, as the real GPU does. [video] gx_overlap in the config
+// file (default: on for tvOS, off elsewhere); MKW_GX_OVERLAP=0/1 overrides the file.
 bool OverlapFrames();
 // Records that the frame just submitted ends here (publishing it to the worker).
 void MarkFrameEnd();

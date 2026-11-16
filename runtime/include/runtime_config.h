@@ -50,6 +50,8 @@ struct RuntimeUserConfig {
     std::optional<bool> skipUnreadyPipelines;
     std::optional<bool> vsync;
     std::optional<bool> gxWorker;
+    std::optional<bool> gxOverlap;
+    std::optional<bool> race30Fps;
     std::optional<bool> disableCopyFilter;
     std::optional<bool> textureReplacements;
     std::optional<bool> textureDumps;
@@ -494,6 +496,8 @@ inline RuntimeUserConfig ParseConfigDocument(const toml::value& document) {
     config.skipUnreadyPipelines = FindConfigValue<bool>(document, "video", "skip_unready_pipelines");
     config.vsync = FindConfigValue<bool>(document, "video", "vsync");
     config.gxWorker = FindConfigValue<bool>(document, "video", "gx_worker");
+    config.gxOverlap = FindConfigValue<bool>(document, "video", "gx_overlap");
+    config.race30Fps = FindConfigValue<bool>(document, "video", "race_30fps");
     config.disableCopyFilter = FindConfigValue<bool>(document, "video", "disable_copy_filter");
     config.showFps = FindConfigValue<bool>(document, "video", "show_fps");
     config.textureReplacements = FindConfigValue<bool>(document, "video", "texture_replacements");
@@ -955,6 +959,19 @@ inline bool AudioMixWorkerEnabled(bool fallback = true) {
 
 inline bool GxWorkerEnabled(bool fallback = true) {
     return Get().gxWorker.value_or(fallback);
+}
+
+// [video] gx_overlap: whether a frame may end while the GX worker still draws it
+// (GxWorker::OverlapFrames). Not in the default file; the fallback is per platform. Set it to
+// false if graphics flicker.
+inline bool GxOverlapEnabled(bool fallback) {
+    return Get().gxOverlap.value_or(fallback);
+}
+
+// [video] race_30fps: one- and two-player races in the game's own 30 fps mode (two game updates
+// per drawn frame), for hosts too slow to draw 60 frames per second. Not in the default file.
+inline bool Race30FpsEnabled(bool fallback = false) {
+    return Get().race30Fps.value_or(fallback);
 }
 
 // Whether background music should duck automatically for other media playback.

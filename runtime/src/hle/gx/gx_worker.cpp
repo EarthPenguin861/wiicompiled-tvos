@@ -1,6 +1,7 @@
 #include "gx_worker.h"
 
 #include "perf_stats.h"
+#include "platform/apple_target.h"
 #include "runtime_config.h"
 #include "runtime_log.h"
 #include "thread_priority.h"
@@ -58,7 +59,12 @@ uint64_t g_write = 0;
 std::atomic<uint64_t> g_head{0};
 std::atomic<uint64_t> g_tail{0};
 std::atomic<bool> g_consumerWaiting{false};
-std::atomic<bool> g_producerWaiting{false};
+// The tail the game thread is blocked waiting for, kNotWaiting while it is not blocked. The worker
+// wakes it once that tail is reached. Waking it after every record instead made both threads
+// spend most of a Sync in the kernel (MKW_GX_WAKE_EACH=1 restores that, for benchmarking).
+constexpr uint64_t kNotWaiting = ~uint64_t{0};
+std::atomic<uint64_t> g_waitTarget{kNotWaiting};
+bool g_wakeEachRecord = false;
 std::mutex g_headMutex;
 std::condition_variable g_headCv;
 std::mutex g_tailMutex;
@@ -122,11 +128,11 @@ void WaitForTail(uint64_t minTail, bool service) {
         {
             PerfStats::WaitScope wait;
             std::unique_lock lock{g_tailMutex};
-            g_producerWaiting.store(true, std::memory_order_seq_cst);
+            g_waitTarget.store(g_wakeEachRecord ? 0 : minTail, std::memory_order_seq_cst);
             if (g_tail.load(std::memory_order_seq_cst) < minTail) {
                 WaitTailBriefly(lock);
             }
-            g_producerWaiting.store(false, std::memory_order_relaxed);
+            g_waitTarget.store(kNotWaiting, std::memory_order_relaxed);
         }
         if (service && g_waitCallback != nullptr && g_tail.load(std::memory_order_acquire) < minTail) {
             g_waitCallback();
@@ -253,7 +259,7 @@ void WorkerMain() {
             }
             tail += header->size;
             g_tail.store(tail, std::memory_order_seq_cst);
-            if (g_producerWaiting.load(std::memory_order_seq_cst)) {
+            if (tail >= g_waitTarget.load(std::memory_order_seq_cst)) {
                 std::lock_guard lock{g_tailMutex};
                 g_tailCv.notify_all();
             }
@@ -348,11 +354,12 @@ void Sync() {
 
 bool OverlapFrames() {
     static const bool enabled = [] {
+        // [video] gx_overlap in the config file, on by default on the two-core Apple TV HD;
+        // MKW_GX_OVERLAP=0/1 overrides the file.
         const char* value = std::getenv("MKW_GX_OVERLAP");
-        const bool on = value != nullptr && std::strcmp(value, "0") != 0;
-        if (on) {
-            RT_LOGF(RT_TAG_GX, "GX worker frame overlap on\n");
-        }
+        const bool on = value != nullptr ? std::strcmp(value, "0") != 0
+                                         : RuntimeConfigFile::GxOverlapEnabled(MKW_HOST_TVOS != 0);
+        RT_LOGF(RT_TAG_GX, "GX worker frame overlap %s\n", on ? "on" : "off");
         return on;
     }();
     return enabled;
@@ -411,6 +418,8 @@ void Start() {
         g_ring = static_cast<uint8_t*>(::operator new(kCapacity, std::align_val_t{64}));
     }
     g_fifoBytes.reserve(kFifoFlushBytes + 4096);
+    const char* wakeEach = std::getenv("MKW_GX_WAKE_EACH");
+    g_wakeEachRecord = wakeEach != nullptr && std::strcmp(wakeEach, "0") != 0;
     g_stop.store(false, std::memory_order_relaxed);
     g_abandon.store(false, std::memory_order_relaxed);
     g_exited.store(false, std::memory_order_relaxed);
